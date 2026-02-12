@@ -70,7 +70,7 @@ cache_policy:
     - /opt/comfy/models
 build:
   comfy_version: 0.3.26
-  image_repository: ghcr.io/comfy-endpoints/golden
+  image_repository: ghcr.io/matyoung89/comfy-endpoints-golden
   dockerfile_path: docker/Dockerfile.golden
   build_context: .
   container_registry_auth_id: ""
