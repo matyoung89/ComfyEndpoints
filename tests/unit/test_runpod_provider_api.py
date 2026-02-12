@@ -115,15 +115,15 @@ class RunpodProviderApiTest(unittest.TestCase):
             status = provider.get_status("pod-1")
         self.assertEqual(status.state, DeploymentState.BOOTSTRAPPING)
 
-    def test_get_endpoint_uses_host_id_when_available(self) -> None:
+    def test_get_endpoint_prefers_gateway_port(self) -> None:
         provider = RunpodProvider()
         with mock.patch.object(
             provider,
             "_rest_request",
-            return_value={"id": "pod-1", "ports": ["8080/http"]},
+            return_value={"id": "pod-1", "ports": ["8080/http", "3000/http"]},
         ):
             endpoint = provider.get_endpoint("pod-1")
-        self.assertEqual(endpoint, "https://pod-1-8080.proxy.runpod.net")
+        self.assertEqual(endpoint, "https://pod-1-3000.proxy.runpod.net")
 
     def test_get_logs_uses_logs_endpoint_when_available(self) -> None:
         provider = RunpodProvider()

@@ -360,15 +360,24 @@ class RunpodProvider(CloudProviderAdapter):
     def get_endpoint(self, deployment_id: str) -> str:
         pod = self._rest_request("GET", f"/pods/{deployment_id}")
         if not isinstance(pod, dict):
-            return f"https://{deployment_id}-8080.proxy.runpod.net"
+            return f"https://{deployment_id}-3000.proxy.runpod.net"
 
         ports = pod.get("ports") or []
-        proxy_port = "8080"
+        preferred_port = os.getenv("COMFY_ENDPOINTS_PUBLIC_PORT", "3000").strip() or "3000"
+        proxy_port = preferred_port
+        candidate_ports: list[str] = []
         if isinstance(ports, list):
             for item in ports:
                 if isinstance(item, str) and item.endswith("/http"):
-                    proxy_port = item.split("/", 1)[0]
-                    break
+                    candidate_ports.append(item.split("/", 1)[0])
+
+        if candidate_ports:
+            if preferred_port in candidate_ports:
+                proxy_port = preferred_port
+            elif "3000" in candidate_ports:
+                proxy_port = "3000"
+            else:
+                proxy_port = candidate_ports[0]
 
         return f"https://{deployment_id}-{proxy_port}.proxy.runpod.net"
 
