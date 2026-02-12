@@ -76,14 +76,15 @@ class ImageResolverAndManagerTest(unittest.TestCase):
             manager = ImageManager(project_root=root)
 
             with mock.patch("comfy_endpoints.runtime.image_fingerprint._source_fingerprint", return_value="src-hash"):
-                with mock.patch.object(manager, "_docker_available", return_value=True):
-                    with mock.patch("subprocess.run") as mocked_run:
-                        mocked_run.side_effect = [
-                            mock.Mock(returncode=1, stdout="", stderr="not found"),
-                            mock.Mock(returncode=0, stdout="built", stderr=""),
-                            mock.Mock(returncode=0, stdout="exists", stderr=""),
-                        ]
-                        result = manager.ensure_image(app_spec)
+                with mock.patch("comfy_endpoints.runtime.image_fingerprint._git_fingerprint", return_value="git-hash"):
+                    with mock.patch.object(manager, "_docker_available", return_value=True):
+                        with mock.patch("subprocess.run") as mocked_run:
+                            mocked_run.side_effect = [
+                                mock.Mock(returncode=1, stdout="", stderr="not found"),
+                                mock.Mock(returncode=0, stdout="built", stderr=""),
+                                mock.Mock(returncode=0, stdout="exists", stderr=""),
+                            ]
+                            result = manager.ensure_image(app_spec)
 
             self.assertTrue(result.built)
             self.assertTrue(result.image_exists)

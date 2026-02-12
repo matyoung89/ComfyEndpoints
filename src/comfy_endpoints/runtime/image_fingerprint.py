@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 from comfy_endpoints.models import AppSpecV1
@@ -33,6 +34,28 @@ def _source_fingerprint(project_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _git_fingerprint(project_root: Path) -> str | None:
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        dirty_hash = hashlib.sha256(dirty.encode("utf-8")).hexdigest()[:12]
+        return f"{head}:{dirty_hash}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def compute_image_fingerprint(app_spec: AppSpecV1, dockerfile_contents: str, project_root: Path) -> str:
     plugin_refs = [f"{plugin.repo}@{plugin.ref}" for plugin in app_spec.build.plugins]
     payload = {
@@ -40,6 +63,7 @@ def compute_image_fingerprint(app_spec: AppSpecV1, dockerfile_contents: str, pro
         "version": app_spec.version,
         "plugins": sorted(plugin_refs),
         "dockerfile_sha256": _hash_text(dockerfile_contents),
+        "git_fingerprint": _git_fingerprint(project_root),
         "source_fingerprint": _source_fingerprint(project_root),
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
