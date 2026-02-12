@@ -38,6 +38,10 @@ class FakeProvider:
     def destroy(self, deployment_id):
         _ = deployment_id
 
+    def get_logs(self, deployment_id, tail_lines=200):
+        _ = (deployment_id, tail_lines)
+        return ""
+
 
 class OutbidThenReadyProvider(FakeProvider):
     def __init__(self):
@@ -61,6 +65,12 @@ class OutbidThenReadyProvider(FakeProvider):
 
 
 class DeploymentServiceTest(unittest.TestCase):
+    def test_new_log_lines_detects_incremental_append(self) -> None:
+        previous = "one\ntwo"
+        current = "one\ntwo\nthree\nfour"
+        lines = DeploymentService._new_log_lines(previous, current, max_lines=25)
+        self.assertEqual(lines, ["three", "four"])
+
     def test_deploy_records_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -139,6 +149,7 @@ class DeploymentServiceTest(unittest.TestCase):
                 fake_provider.last_env.get("COMFY_ENDPOINTS_CONTRACT_PATH"),
                 "/opt/comfy_endpoints/runtime/workflow.contract.json",
             )
+            self.assertIn("pod_logs_tail", record.metadata)
 
     def test_retries_on_outbid_until_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

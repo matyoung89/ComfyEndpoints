@@ -125,6 +125,33 @@ class RunpodProviderApiTest(unittest.TestCase):
             endpoint = provider.get_endpoint("pod-1")
         self.assertEqual(endpoint, "https://pod-1-8080.proxy.runpod.net")
 
+    def test_get_logs_uses_logs_endpoint_when_available(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(
+            provider,
+            "_rest_request",
+            return_value=[
+                {"message": "line 1"},
+                {"message": "line 2"},
+            ],
+        ):
+            logs = provider.get_logs("pod-1", tail_lines=100)
+        self.assertEqual(logs, "line 1\nline 2")
+
+    def test_get_logs_falls_back_to_pod_payload_when_logs_endpoint_missing(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(provider, "_rest_request") as mocked_rest:
+            mocked_rest.side_effect = [
+                {"_suppressed_http_error": 404, "_detail": "not found"},
+                {"_suppressed_http_error": 404, "_detail": "not found"},
+                {
+                    "desiredStatus": "EXITED",
+                    "lastStatusChange": "python: can't open file '/opt/comfy/main.py': [Errno 2] No such file or directory",
+                },
+            ]
+            logs = provider.get_logs("pod-1", tail_lines=100)
+        self.assertIn("/opt/comfy/main.py", logs)
+
 
 if __name__ == "__main__":
     unittest.main()

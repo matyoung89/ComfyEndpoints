@@ -47,5 +47,9 @@ class CloudProviderAdapter(ABC):
     def destroy(self, deployment_id: str) -> None:
         raise NotImplementedError
 
+    def get_logs(self, deployment_id: str, tail_lines: int = 200) -> str:
+        _ = (deployment_id, tail_lines)
+        return ""
+
     def build_metadata(self) -> dict[str, Any]:
         return {}

@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from json import JSONDecodeError
 from typing import Any
 
 from comfy_endpoints.models import AppSpecV1, DeploymentState
@@ -147,7 +148,58 @@ class RunpodProvider(CloudProviderAdapter):
         if not raw:
             return {}
 
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except JSONDecodeError:
+            return raw
+
+    @staticmethod
+    def _collect_log_lines(payload: Any, lines: list[str]) -> None:
+        if payload is None:
+            return
+        if isinstance(payload, str):
+            for entry in payload.splitlines():
+                value = entry.strip()
+                if value:
+                    lines.append(value)
+            return
+        if isinstance(payload, list):
+            for item in payload:
+                RunpodProvider._collect_log_lines(item, lines)
+            return
+        if isinstance(payload, dict):
+            preferred_keys = (
+                "message",
+                "log",
+                "line",
+                "text",
+                "detail",
+                "error",
+                "status",
+                "lastStatusChange",
+            )
+            for key in preferred_keys:
+                if key in payload:
+                    RunpodProvider._collect_log_lines(payload[key], lines)
+            for key in ("logs", "events", "data", "items"):
+                if key in payload:
+                    RunpodProvider._collect_log_lines(payload[key], lines)
+
+    @classmethod
+    def _normalize_logs(cls, payload: Any, tail_lines: int) -> str:
+        lines: list[str] = []
+        cls._collect_log_lines(payload, lines)
+        if not lines:
+            return ""
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            if line in seen:
+                continue
+            seen.add(line)
+            deduped.append(line)
+        return "\n".join(deduped[-tail_lines:])
 
     @staticmethod
     def _map_region_to_data_center(region_hint: str | None, default: str) -> str:
@@ -326,3 +378,37 @@ class RunpodProvider(CloudProviderAdapter):
         except RunpodError:
             pass
         self._rest_request("DELETE", f"/pods/{deployment_id}")
+
+    def get_logs(self, deployment_id: str, tail_lines: int = 200) -> str:
+        logs_response = self._rest_request(
+            "GET",
+            f"/pods/{deployment_id}/logs",
+            query_params={"tail": str(tail_lines)},
+            suppress_http_errors=(400, 404),
+        )
+        if isinstance(logs_response, dict) and "_suppressed_http_error" in logs_response:
+            logs_response = {}
+        logs = self._normalize_logs(logs_response, tail_lines)
+        if logs:
+            return logs
+
+        events_response = self._rest_request(
+            "GET",
+            f"/pods/{deployment_id}/events",
+            query_params={"limit": str(tail_lines)},
+            suppress_http_errors=(400, 404),
+        )
+        if isinstance(events_response, dict) and "_suppressed_http_error" in events_response:
+            events_response = {}
+        events = self._normalize_logs(events_response, tail_lines)
+        if events:
+            return events
+
+        pod_response = self._rest_request(
+            "GET",
+            f"/pods/{deployment_id}",
+            suppress_http_errors=(404,),
+        )
+        if isinstance(pod_response, dict) and "_suppressed_http_error" in pod_response:
+            return ""
+        return self._normalize_logs(pod_response, tail_lines)

@@ -33,6 +33,36 @@ class DeploymentService:
         except (urllib.error.URLError, urllib.error.HTTPError):
             return False
 
+    @staticmethod
+    def _new_log_lines(previous: str, current: str, max_lines: int = 25) -> list[str]:
+        if not current:
+            return []
+        if previous and current == previous:
+            return []
+        if previous and current.startswith(previous):
+            appended = current[len(previous) :]
+            new_lines = [line for line in appended.splitlines() if line.strip()]
+            return new_lines[-max_lines:]
+
+        prev_lines = previous.splitlines() if previous else []
+        curr_lines = current.splitlines()
+        start = 0
+        if prev_lines and len(curr_lines) >= len(prev_lines):
+            if curr_lines[: len(prev_lines)] == prev_lines:
+                start = len(prev_lines)
+        new_lines = [line for line in curr_lines[start:] if line.strip()]
+        return new_lines[-max_lines:]
+
+    @staticmethod
+    def _provider_logs(provider: object, deployment_id: str, tail_lines: int = 200) -> str:
+        getter = getattr(provider, "get_logs", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter(deployment_id, tail_lines=tail_lines) or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
     def deploy(
         self,
         app_spec_path: Path,
@@ -65,6 +95,7 @@ class DeploymentService:
         endpoint_url = ""
         status = None
         last_error = ""
+        latest_logs = ""
 
         for attempt in range(1, max_attempts + 1):
             if progress_callback:
@@ -93,10 +124,20 @@ class DeploymentService:
                     progress_callback(f"[deploy] endpoint candidate={endpoint_url}")
                 deadline = time.time() + 900
                 last_detail = ""
+                next_log_poll = 0.0
                 while True:
                     if progress_callback and status.detail != last_detail:
                         progress_callback(f"[deploy] pod status: {status.detail}")
                         last_detail = status.detail
+
+                    now = time.time()
+                    if progress_callback and now >= next_log_poll:
+                        polled_logs = self._provider_logs(provider, deployment_id, tail_lines=200)
+                        for line in self._new_log_lines(latest_logs, polled_logs):
+                            progress_callback(f"[pod-log] {line}")
+                        if polled_logs:
+                            latest_logs = polled_logs
+                        next_log_poll = now + 10.0
 
                     if status.state == DeploymentState.FAILED:
                         break
@@ -161,6 +202,7 @@ class DeploymentService:
                 "image_built": image_resolution.built,
                 "contract_id": contract.contract_id,
                 "status_detail": status.detail,
+                "pod_logs_tail": latest_logs,
             },
         )
         self.state_store.put(record)
@@ -176,6 +218,9 @@ class DeploymentService:
         latest = provider.get_status(record.deployment_id)
         record.state = latest.state
         record.metadata["status_detail"] = latest.detail
+        record.metadata["pod_logs_tail"] = self._provider_logs(
+            provider, record.deployment_id, tail_lines=200
+        )
         self.state_store.put(record)
         return record
 
@@ -184,12 +229,19 @@ class DeploymentService:
         if not record:
             raise RuntimeError(f"No deployment record found for app_id={app_id}")
 
+        provider = build_provider(record.provider)
+        live_logs = self._provider_logs(provider, record.deployment_id, tail_lines=200)
+        if live_logs:
+            record.metadata["pod_logs_tail"] = live_logs
+            self.state_store.put(record)
+
         summary = {
             "app_id": record.app_id,
             "deployment_id": record.deployment_id,
             "state": record.state.value,
             "endpoint_url": record.endpoint_url,
             "status_detail": record.metadata.get("status_detail", "unknown"),
+            "pod_logs_tail": record.metadata.get("pod_logs_tail", ""),
         }
         return json.dumps(summary, indent=2)
 

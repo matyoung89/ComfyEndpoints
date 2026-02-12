@@ -41,3 +41,7 @@ class UnsupportedProviderAdapter(CloudProviderAdapter):
     def destroy(self, deployment_id: str) -> None:
         _ = deployment_id
         raise self._unsupported()
+
+    def get_logs(self, deployment_id: str, tail_lines: int = 200) -> str:
+        _ = (deployment_id, tail_lines)
+        return ""
