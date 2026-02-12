@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import signal
@@ -16,6 +17,23 @@ def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def ensure_contract_file(contract_path: Path) -> None:
+    if contract_path.exists():
+        return
+
+    contract_json = os.getenv("COMFY_ENDPOINTS_CONTRACT_JSON", "").strip()
+    if not contract_json:
+        raise RuntimeError(f"Contract path missing: {contract_path}")
+
+    try:
+        parsed = json.loads(contract_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Invalid COMFY_ENDPOINTS_CONTRACT_JSON payload") from exc
+
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+
+
 def run_bootstrap(
     cache_root: Path,
     watch_paths: list[Path],
@@ -24,8 +42,7 @@ def run_bootstrap(
     api_key: str,
     gateway_port: int,
 ) -> int:
-    if not contract_path.exists():
-        raise RuntimeError(f"Contract path missing: {contract_path}")
+    ensure_contract_file(contract_path)
 
     parse_workflow_contract(contract_path)
 

@@ -26,6 +26,8 @@ class RunpodConfig:
     keychain_service: str = "COMFY_ENDPOINTS_RUNPOD_API_KEY"
     keychain_account_env: str = "COMFY_ENDPOINTS_RUNPOD_KEYCHAIN_ACCOUNT"
     default_data_center_id: str = "US-KS-2"
+    default_cloud_type: str = "COMMUNITY"
+    default_interruptible: bool = True
 
 
 class RunpodProvider(CloudProviderAdapter):
@@ -33,6 +35,35 @@ class RunpodProvider(CloudProviderAdapter):
 
     def __init__(self, config: RunpodConfig | None = None):
         self.config = config or RunpodConfig()
+        self._create_profile_index = 0
+
+    @staticmethod
+    def _parse_bool(raw: str) -> bool:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _deployment_profiles(self) -> list[tuple[str, bool]]:
+        # Cheapest to most stable fallback order.
+        default_profiles = [
+            ("COMMUNITY", True),
+            ("COMMUNITY", False),
+            ("SECURE", True),
+            ("SECURE", False),
+        ]
+        raw = os.getenv("COMFY_ENDPOINTS_RUNPOD_DEPLOY_PROFILES", "").strip()
+        if not raw:
+            return default_profiles
+
+        parsed: list[tuple[str, bool]] = []
+        for item in raw.split(","):
+            chunk = item.strip()
+            if not chunk:
+                continue
+            if ":" not in chunk:
+                continue
+            cloud_type, interruptible_raw = chunk.split(":", 1)
+            parsed.append((cloud_type.strip().upper(), self._parse_bool(interruptible_raw)))
+
+        return parsed or default_profiles
 
     def _api_key_from_keychain(self) -> str | None:
         account = os.getenv(self.config.keychain_account_env, os.getenv("USER", "")).strip()
@@ -85,6 +116,7 @@ class RunpodProvider(CloudProviderAdapter):
         path: str,
         body: dict[str, Any] | None = None,
         query_params: dict[str, str] | None = None,
+        suppress_http_errors: tuple[int, ...] = (),
     ) -> Any:
         query = ""
         if query_params:
@@ -106,6 +138,8 @@ class RunpodProvider(CloudProviderAdapter):
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code in suppress_http_errors:
+                return {"_suppressed_http_error": exc.code, "_detail": detail}
             raise RunpodError(f"RunPod REST HTTP error {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise RunpodError(f"RunPod REST connection error: {exc.reason}") from exc
@@ -139,31 +173,51 @@ class RunpodProvider(CloudProviderAdapter):
         env["COMFY_HEADLESS"] = "1"
 
         image_ref = app_spec.build.image_ref or "ghcr.io/comfy-endpoints/golden:latest"
-        payload = {
-            "name": f"comfy-endpoints-{app_spec.app_id}",
-            "imageName": image_ref,
-            "gpuCount": 1,
-            "cloudType": "SECURE",
-            "containerDiskInGb": 30,
-            "volumeInGb": 100,
-            "volumeMountPath": "/cache",
-            "ports": ["8080/http", "3000/http", "8188/http"],
-            "env": env,
-            "dataCenterIds": [data_center_id],
-            "supportPublicIp": True,
-        }
-        if app_spec.build.container_registry_auth_id:
-            payload["containerRegistryAuthId"] = app_spec.build.container_registry_auth_id
+        profiles = self._deployment_profiles()
+        last_error: Exception | None = None
+        for idx in range(self._create_profile_index, len(profiles)):
+            cloud_type, interruptible = profiles[idx]
+            self._create_profile_index = idx + 1
+            payload = {
+                "name": f"comfy-endpoints-{app_spec.app_id}",
+                "imageName": image_ref,
+                "gpuCount": 1,
+                "cloudType": cloud_type,
+                "interruptible": interruptible,
+                "containerDiskInGb": 30,
+                "volumeInGb": 100,
+                "volumeMountPath": "/cache",
+                "ports": ["8080/http", "3000/http", "8188/http"],
+                "env": env,
+                "dataCenterIds": [data_center_id],
+                "supportPublicIp": True,
+            }
+            if app_spec.build.container_registry_auth_id:
+                payload["containerRegistryAuthId"] = app_spec.build.container_registry_auth_id
 
-        created = self._rest_request("POST", "/pods", payload)
-        if not isinstance(created, dict):
-            raise RunpodError("RunPod create pod response was not an object")
+            try:
+                created = self._rest_request("POST", "/pods", payload)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                continue
 
-        deployment_id = created.get("id")
-        if not deployment_id:
-            raise RunpodError(f"RunPod create pod missing id: {created}")
+            if not isinstance(created, dict):
+                last_error = RunpodError("RunPod create pod response was not an object")
+                continue
 
-        return str(deployment_id)
+            deployment_id = created.get("id")
+            if not deployment_id:
+                last_error = RunpodError(f"RunPod create pod missing id: {created}")
+                continue
+
+            return str(deployment_id)
+
+        if last_error:
+            raise RunpodError(
+                "Failed to create deployment across cheapest profiles; last error: "
+                f"{last_error}"
+            ) from last_error
+        raise RunpodError("Failed to create deployment across cheapest profiles")
 
     def ensure_volume(self, deployment_id: str, size_gb: int) -> str:
         pod = self._rest_request("GET", f"/pods/{deployment_id}")
@@ -212,7 +266,15 @@ class RunpodProvider(CloudProviderAdapter):
             patch_payload,
         )
 
-        self._rest_request("POST", f"/pods/{deployment_id}/start")
+        start_response = self._rest_request(
+            "POST",
+            f"/pods/{deployment_id}/start",
+            suppress_http_errors=(500,),
+        )
+        if isinstance(start_response, dict):
+            detail = str(start_response.get("_detail") or "")
+            if detail and "not in exited state" not in detail.lower():
+                raise RunpodError(f"RunPod pod start failed: {detail}")
 
     def get_status(self, deployment_id: str) -> DeploymentStatus:
         pod = self._rest_request("GET", f"/pods/{deployment_id}")
@@ -220,16 +282,28 @@ class RunpodProvider(CloudProviderAdapter):
             return DeploymentStatus(state=DeploymentState.FAILED, detail="Invalid pod response")
 
         desired_status = str(pod.get("desiredStatus") or "UNKNOWN").upper()
+        last_status_change = str(pod.get("lastStatusChange") or "")
+        detail = f"{desired_status}: {last_status_change}".strip(": ")
 
         state = DeploymentState.BOOTSTRAPPING
         if desired_status == "RUNNING":
-            state = DeploymentState.READY
+            # RunPod can report RUNNING while the container is still being created or image is still pulling.
+            warmup_markers = [
+                "create container",
+                "still fetching image",
+                "pulling image",
+                "downloading",
+            ]
+            if any(marker in last_status_change.lower() for marker in warmup_markers):
+                state = DeploymentState.BOOTSTRAPPING
+            else:
+                state = DeploymentState.READY
         elif desired_status in {"EXITED", "STOPPED"}:
             state = DeploymentState.DEGRADED
         elif desired_status == "TERMINATED":
             state = DeploymentState.TERMINATED
 
-        return DeploymentStatus(state=state, detail=desired_status)
+        return DeploymentStatus(state=state, detail=detail or desired_status)
 
     def get_endpoint(self, deployment_id: str) -> str:
         pod = self._rest_request("GET", f"/pods/{deployment_id}")

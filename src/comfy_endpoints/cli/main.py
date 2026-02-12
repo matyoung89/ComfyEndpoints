@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from comfy_endpoints.runtime import DeploymentService
@@ -99,7 +100,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 def _cmd_deploy(args: argparse.Namespace) -> int:
     svc = _service(args.state_dir)
-    record = svc.deploy(Path(args.app_spec).resolve())
+    record = svc.deploy(
+        Path(args.app_spec).resolve(),
+        progress_callback=lambda msg: print(f"[deploy] {msg}", file=sys.stderr),
+    )
     print(
         json.dumps(
             {

@@ -11,10 +11,11 @@ def resolve_golden_image(app_spec: AppSpecV1) -> str:
         return app_spec.build.image_ref
 
     repository = app_spec.build.image_repository or "ghcr.io/comfy-endpoints/golden"
+    project_root = Path(__file__).resolve().parents[3]
     dockerfile_path = Path(app_spec.build.dockerfile_path or "docker/Dockerfile.golden")
     if not dockerfile_path.is_absolute():
-        dockerfile_path = Path(__file__).resolve().parents[3] / dockerfile_path
+        dockerfile_path = project_root / dockerfile_path
     dockerfile_contents = dockerfile_path.read_text(encoding="utf-8")
-    fingerprint = compute_image_fingerprint(app_spec, dockerfile_contents)
+    fingerprint = compute_image_fingerprint(app_spec, dockerfile_contents, project_root)
     tag = f"{app_spec.build.comfy_version}-{app_spec.version}-{fingerprint}"
     return f"{repository}:{tag}"

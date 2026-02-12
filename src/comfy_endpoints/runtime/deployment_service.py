@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+import urllib.error
+import urllib.request
+from dataclasses import asdict
 from pathlib import Path
+from typing import Callable
 
 from comfy_endpoints.contracts.validators import validate_deployable_spec
 from comfy_endpoints.models import DeploymentRecord, DeploymentState
@@ -20,38 +25,130 @@ class DeploymentService:
         app_spec, contract = validate_deployable_spec(app_spec_path)
         return app_spec.app_id, contract.contract_id
 
-    def deploy(self, app_spec_path: Path) -> DeploymentRecord:
+    @staticmethod
+    def _is_endpoint_ready(endpoint_url: str) -> bool:
+        try:
+            with urllib.request.urlopen(f"{endpoint_url}/healthz", timeout=10) as response:
+                return response.status == 200
+        except (urllib.error.URLError, urllib.error.HTTPError):
+            return False
+
+    def deploy(
+        self,
+        app_spec_path: Path,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> DeploymentRecord:
         app_spec, contract = validate_deployable_spec(app_spec_path)
         provider = build_provider(app_spec.provider)
+        if progress_callback:
+            progress_callback("[deploy] validated app spec and workflow contract")
 
-        image_resolution = self.image_manager.ensure_image(app_spec)
+        image_resolution = self.image_manager.ensure_image(
+            app_spec,
+            progress_callback=progress_callback,
+        )
         image_ref = image_resolution.image_ref
         app_spec.build.image_ref = image_ref
-
-        deployment_id = provider.create_deployment(app_spec)
-        provider.ensure_volume(deployment_id=deployment_id, size_gb=100)
+        if progress_callback:
+            progress_callback(
+                f"[deploy] image ready: {image_ref} (built={image_resolution.built})"
+            )
+        max_attempts = int(os.getenv("COMFY_ENDPOINTS_RUNPOD_MAX_DEPLOY_ATTEMPTS", "4"))
         env = dict(app_spec.env)
         env["COMFY_ENDPOINTS_APP_ID"] = app_spec.app_id
         env["COMFY_ENDPOINTS_CONTRACT_ID"] = contract.contract_id
-
+        env["COMFY_ENDPOINTS_CONTRACT_PATH"] = "/opt/comfy_endpoints/runtime/workflow.contract.json"
+        env["COMFY_ENDPOINTS_CONTRACT_JSON"] = json.dumps(asdict(contract))
         mounts = [{"source": "cache", "target": "/cache"}]
-        provider.deploy_image(
-            deployment_id=deployment_id,
-            image_ref=image_ref,
-            env=env,
-            mounts=mounts,
-            container_registry_auth_id=app_spec.build.container_registry_auth_id,
-        )
 
-        status = provider.get_status(deployment_id)
-        deadline = time.time() + 90
-        while status.state not in {DeploymentState.READY, DeploymentState.FAILED}:
-            if time.time() > deadline:
+        deployment_id = ""
+        endpoint_url = ""
+        status = None
+        last_error = ""
+
+        for attempt in range(1, max_attempts + 1):
+            if progress_callback:
+                progress_callback(f"[deploy] deploy attempt {attempt}/{max_attempts}")
+
+            deployment_id = provider.create_deployment(app_spec)
+            if progress_callback:
+                progress_callback(f"[deploy] created deployment_id={deployment_id}")
+            try:
+                provider.ensure_volume(deployment_id=deployment_id, size_gb=100)
+                if progress_callback:
+                    progress_callback("[deploy] volume ensured (>=100GB)")
+                provider.deploy_image(
+                    deployment_id=deployment_id,
+                    image_ref=image_ref,
+                    env=env,
+                    mounts=mounts,
+                    container_registry_auth_id=app_spec.build.container_registry_auth_id,
+                )
+                if progress_callback:
+                    progress_callback("[deploy] image/env/mounts applied to pod")
+
+                status = provider.get_status(deployment_id)
+                endpoint_url = provider.get_endpoint(deployment_id)
+                if progress_callback:
+                    progress_callback(f"[deploy] endpoint candidate={endpoint_url}")
+                deadline = time.time() + 900
+                last_detail = ""
+                while True:
+                    if progress_callback and status.detail != last_detail:
+                        progress_callback(f"[deploy] pod status: {status.detail}")
+                        last_detail = status.detail
+
+                    if status.state == DeploymentState.FAILED:
+                        break
+                    if status.state in {DeploymentState.DEGRADED, DeploymentState.TERMINATED}:
+                        break
+
+                    if status.state == DeploymentState.READY and self._is_endpoint_ready(endpoint_url):
+                        break
+
+                    if time.time() > deadline:
+                        break
+                    time.sleep(5)
+                    status = provider.get_status(deployment_id)
+
+                if status.state == DeploymentState.READY and self._is_endpoint_ready(endpoint_url):
+                    if progress_callback:
+                        progress_callback("[deploy] endpoint health check passed")
+                    break
+
+                detail = status.detail if status else "unknown"
+                last_error = detail
+                outbid = "outbid" in detail.lower()
+                retryable_state = status.state in {
+                    DeploymentState.DEGRADED,
+                    DeploymentState.TERMINATED,
+                    DeploymentState.FAILED,
+                }
+                if attempt < max_attempts and (outbid or retryable_state):
+                    if progress_callback:
+                        progress_callback(f"[deploy] retrying with next profile due to: {detail}")
+                    provider.destroy(deployment_id)
+                    continue
                 break
-            time.sleep(3)
-            status = provider.get_status(deployment_id)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                try:
+                    provider.destroy(deployment_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                if attempt < max_attempts:
+                    if progress_callback:
+                        progress_callback(f"[deploy] retrying after error: {last_error}")
+                    continue
+                raise
 
-        endpoint_url = provider.get_endpoint(deployment_id)
+        if status is None:
+            raise RuntimeError(f"Deployment did not start. Last error: {last_error}")
+
+        if status.state == DeploymentState.READY and not self._is_endpoint_ready(endpoint_url):
+            status.state = DeploymentState.BOOTSTRAPPING
+            status.detail = f"{status.detail} (endpoint not ready)"
+
         record = DeploymentRecord(
             app_id=app_spec.app_id,
             deployment_id=deployment_id,

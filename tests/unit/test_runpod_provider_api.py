@@ -57,6 +57,8 @@ class RunpodProviderApiTest(unittest.TestCase):
         self.assertEqual(payload["name"], "comfy-endpoints-demo")
         self.assertEqual(payload["volumeMountPath"], "/cache")
         self.assertIn("8080/http", payload["ports"][0])
+        self.assertEqual(payload["cloudType"], "COMMUNITY")
+        self.assertTrue(payload["interruptible"])
 
     def test_create_deployment_includes_registry_auth_when_configured(self) -> None:
         provider = RunpodProvider()
@@ -99,9 +101,19 @@ class RunpodProviderApiTest(unittest.TestCase):
 
     def test_get_status_maps_states(self) -> None:
         provider = RunpodProvider()
-        with mock.patch.object(provider, "_rest_request", return_value={"desiredStatus": "RUNNING"}):
+        with mock.patch.object(provider, "_rest_request", return_value={"desiredStatus": "RUNNING", "lastStatusChange": "Rented by User"}):
             status = provider.get_status("pod-1")
         self.assertEqual(status.state, DeploymentState.READY)
+
+    def test_get_status_stays_bootstrapping_when_image_fetching(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(
+            provider,
+            "_rest_request",
+            return_value={"desiredStatus": "RUNNING", "lastStatusChange": "create container: still fetching image"},
+        ):
+            status = provider.get_status("pod-1")
+        self.assertEqual(status.state, DeploymentState.BOOTSTRAPPING)
 
     def test_get_endpoint_uses_host_id_when_available(self) -> None:
         provider = RunpodProvider()
