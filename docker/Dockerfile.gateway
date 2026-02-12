@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /opt/comfy_endpoints
+
+COPY . /opt/comfy_endpoints
+RUN pip install --no-cache-dir -e .
+
+ENTRYPOINT ["python", "-m", "comfy_endpoints.gateway.server"]

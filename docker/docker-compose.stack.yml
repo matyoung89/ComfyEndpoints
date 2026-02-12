@@ -1,0 +1,42 @@
+services:
+  comfy:
+    image: python:3.11-slim
+    working_dir: /opt/comfy_endpoints
+    volumes:
+      - ..:/opt/comfy_endpoints
+    command: ["python", "docker/comfy_mock_server.py"]
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    depends_on:
+      - comfy
+    volumes:
+      - ../apps/demo:/opt/app:ro
+      - gateway_state:/var/lib/comfy_endpoints
+    command:
+      - --listen-host
+      - 0.0.0.0
+      - --listen-port
+      - "3000"
+      - --api-key
+      - ${COMFY_ENDPOINTS_API_KEY:-dev-api-key}
+      - --comfy-url
+      - http://comfy:8188
+      - --contract-path
+      - /opt/app/workflow.contract.json
+      - --state-db
+      - /var/lib/comfy_endpoints/jobs.db
+
+  proxy:
+    image: nginx:1.27-alpine
+    depends_on:
+      - gateway
+    ports:
+      - "${COMFY_ENDPOINTS_PUBLIC_PORT:-18080}:8080"
+    volumes:
+      - ./nginx.compose.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  gateway_state:

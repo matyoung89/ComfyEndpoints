@@ -1,0 +1,19 @@
+{
+  "contract_id": "demo-contract",
+  "version": "v1",
+  "inputs": [
+    {
+      "name": "prompt",
+      "type": "string",
+      "required": true,
+      "node_id": "1"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "image",
+      "type": "image/png",
+      "node_id": "2"
+    }
+  ]
+}

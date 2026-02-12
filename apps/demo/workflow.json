@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ApiInput",
+      "widgets_values": ["prompt", "string", true, ""]
+    },
+    {
+      "id": 2,
+      "type": "ApiOutput",
+      "widgets_values": ["image", "image/png", ""]
+    }
+  ]
+}
