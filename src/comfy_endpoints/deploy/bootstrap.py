@@ -213,6 +213,35 @@ def _missing_models_from_object_info(
     return parsed
 
 
+def _known_model_requirements_from_prompt(prompt_payload: dict) -> list[MissingModelRequirement]:
+    prompt = prompt_payload.get("prompt")
+    if not isinstance(prompt, dict):
+        return []
+
+    parsed: list[MissingModelRequirement] = []
+    seen: set[tuple[str, str]] = set()
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+
+        for input_name, value in inputs.items():
+            if input_name not in MODEL_DIR_BY_INPUT_NAME:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                continue
+            filename = value.strip()
+            key = (input_name, filename)
+            if key in seen:
+                continue
+            seen.add(key)
+            parsed.append(MissingModelRequirement(input_name=input_name, filename=filename))
+
+    return parsed
+
+
 def _iter_model_entries(payload: object) -> list[dict]:
     entries: list[dict] = []
 
@@ -255,7 +284,16 @@ def _target_model_dir(requirement: MissingModelRequirement, external_type: str) 
 def _download_file(url: str, target_path: Path) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target_path.with_suffix(target_path.suffix + ".part")
-    request = urllib.request.Request(url, method="GET")
+    headers: dict[str, str] = {}
+    if "huggingface.co" in url:
+        hf_token = (
+            os.getenv("HUGGINGFACE_TOKEN", "").strip()
+            or os.getenv("HF_TOKEN", "").strip()
+            or os.getenv("HUGGING_FACE_HUB_TOKEN", "").strip()
+        )
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(request, timeout=600) as response:
         with tmp_path.open("wb") as out:
             while True:
@@ -342,6 +380,18 @@ def _install_missing_models(
                 f"[bootstrap] installed model filename={requirement.filename} into {model_dir}",
                 file=sys.stderr,
             )
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and "huggingface.co" in selected["url"]:
+                print(
+                    f"[bootstrap] failed to install model filename={requirement.filename}: "
+                    "401 Unauthorized from Hugging Face (set HUGGINGFACE_TOKEN/HF_TOKEN)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[bootstrap] failed to install model filename={requirement.filename}: HTTP {exc.code}",
+                    file=sys.stderr,
+                )
         except Exception as exc:  # noqa: BLE001
             print(
                 f"[bootstrap] failed to install model filename={requirement.filename}: {exc}",
@@ -427,6 +477,15 @@ def run_bootstrap(
                         prompt_payload=preflight_payload,
                         object_info_payload=object_info_payload,
                     )
+
+                known_requirements = _known_model_requirements_from_prompt(preflight_payload)
+                if known_requirements:
+                    dedup: dict[tuple[str, str], MissingModelRequirement] = {
+                        (item.input_name, item.filename): item for item in missing_models
+                    }
+                    for item in known_requirements:
+                        dedup.setdefault((item.input_name, item.filename), item)
+                    missing_models = list(dedup.values())
                 if missing_models:
                     print(
                         "[bootstrap] detected missing models: "

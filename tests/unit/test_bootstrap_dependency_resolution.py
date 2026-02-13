@@ -10,6 +10,7 @@ from comfy_endpoints.deploy.bootstrap import (
     _fetch_manager_default_model_list,
     _install_missing_models,
     _iter_model_entries,
+    _known_model_requirements_from_prompt,
     _missing_models_from_object_info,
     _missing_models_from_preflight_error,
 )
@@ -143,6 +144,34 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         }
 
         parsed = _missing_models_from_object_info(prompt_payload, object_info_payload)
+        self.assertEqual(
+            parsed,
+            [
+                MissingModelRequirement(input_name="unet_name", filename="flux1-schnell.safetensors"),
+                MissingModelRequirement(input_name="clip_name1", filename="clip_l.safetensors"),
+                MissingModelRequirement(input_name="clip_name2", filename="t5xxl_fp8_e4m3fn.safetensors"),
+                MissingModelRequirement(input_name="vae_name", filename="ae.safetensors"),
+            ],
+        )
+
+    def test_known_model_requirements_from_prompt(self) -> None:
+        prompt_payload = {
+            "prompt": {
+                "2": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-schnell.safetensors"},
+                },
+                "3": {
+                    "class_type": "DualCLIPLoader",
+                    "inputs": {
+                        "clip_name1": "clip_l.safetensors",
+                        "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+                    },
+                },
+                "4": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+            }
+        }
+        parsed = _known_model_requirements_from_prompt(prompt_payload)
         self.assertEqual(
             parsed,
             [
