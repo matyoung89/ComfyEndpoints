@@ -1,5 +1,5 @@
 app_id: flux_text_to_image
-version: v1
+version: v2
 workflow_path: ./workflow.json
 provider: runpod
 gpu_profile: A10G
