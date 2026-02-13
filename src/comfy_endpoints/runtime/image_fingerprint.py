@@ -71,7 +71,6 @@ def compute_comfybase_fingerprint(
         "comfyui_repo": comfyui_repo,
         "comfyui_ref": comfyui_ref,
         "dockerfile_sha256": _hash_text(dockerfile_contents),
-        "git_fingerprint": _git_fingerprint(project_root),
         "source_fingerprint": source_fingerprint,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
