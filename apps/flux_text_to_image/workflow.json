@@ -96,7 +96,7 @@
       "inputs": {
         "name": "image",
         "type": "image/png",
-        "value": [
+        "image": [
           "8",
           0
         ]

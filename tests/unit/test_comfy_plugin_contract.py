@@ -29,8 +29,11 @@ class ComfyPluginContractTest(unittest.TestCase):
 
     def test_api_output_accepts_generic_value_input(self) -> None:
         module = self._load_module()
-        inputs = module.NODE_CLASS_MAPPINGS["ApiOutput"].INPUT_TYPES()["required"]
-        self.assertEqual(inputs["value"][0], "*")
+        input_types = module.NODE_CLASS_MAPPINGS["ApiOutput"].INPUT_TYPES()
+        self.assertIn("value", input_types["optional"])
+        self.assertEqual(input_types["optional"]["value"][0], "STRING")
+        self.assertIn("image", input_types["optional"])
+        self.assertEqual(input_types["optional"]["image"][0], "IMAGE")
 
     def test_export_contract_rejects_duplicate_output_names(self) -> None:
         module = self._load_module()

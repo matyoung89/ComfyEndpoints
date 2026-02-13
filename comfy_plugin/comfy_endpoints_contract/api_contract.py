@@ -39,7 +39,10 @@ class ApiOutputNode:
             "required": {
                 "name": ("STRING", {"default": "image"}),
                 "type": ("STRING", {"default": "image/png"}),
-                "value": ("*", {"forceInput": True}),
+            },
+            "optional": {
+                "value": ("STRING", {"default": ""}),
+                "image": ("IMAGE",),
             }
         }
 
@@ -49,11 +52,12 @@ class ApiOutputNode:
     CATEGORY = "ComfyEndpoints"
     OUTPUT_NODE = True
 
-    def execute(self, name: str, type: str, value: object) -> tuple[str]:
+    def execute(self, name: str, type: str, value: object = "", image: object | None = None) -> tuple[str]:
+        resolved_value = image if image is not None else value
         output_payload = {
             "name": name,
             "type": type,
-            "value": value,
+            "value": resolved_value,
         }
         return (json.dumps(output_payload, default=str),)
 

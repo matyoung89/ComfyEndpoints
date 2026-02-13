@@ -179,6 +179,41 @@ def _node_media_descriptor(node_output: dict) -> dict[str, str]:
 
     raise OutputResolutionError("OUTPUT_RESOLUTION_ERROR:missing_media_descriptor")
 
+
+def _prompt_graph_from_workflow(workflow_payload: dict) -> dict[str, dict]:
+    prompt = workflow_payload.get("prompt")
+    if isinstance(prompt, dict):
+        normalized: dict[str, dict] = {}
+        for node_id, node in prompt.items():
+            if isinstance(node, dict):
+                normalized[str(node_id)] = node
+        return normalized
+
+    if all(isinstance(key, str) and isinstance(value, dict) for key, value in workflow_payload.items()):
+        if any("class_type" in value for value in workflow_payload.values()):
+            return workflow_payload
+
+    return {}
+
+
+def _api_output_linked_source_node_id(workflow_payload: dict, node_id: str) -> str | None:
+    prompt = _prompt_graph_from_workflow(workflow_payload)
+    node = prompt.get(node_id)
+    if not isinstance(node, dict):
+        return None
+
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return None
+
+    for key in ("image", "value"):
+        link = inputs.get(key)
+        if isinstance(link, list) and link:
+            source_node_id = link[0]
+            if isinstance(source_node_id, (str, int)):
+                return str(source_node_id)
+    return None
+
 class GatewayHandler(BaseHTTPRequestHandler):
     app: GatewayApp
 
@@ -462,7 +497,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         )
 
                     if _is_media_contract_type(field.type):
-                        descriptor = _node_media_descriptor(node_output)
+                        try:
+                            descriptor = _node_media_descriptor(node_output)
+                        except OutputResolutionError:
+                            source_node_id = _api_output_linked_source_node_id(self.app.workflow, field.node_id)
+                            if not source_node_id:
+                                raise
+                            source_node_output = outputs.get(source_node_id)
+                            if not isinstance(source_node_output, dict):
+                                raise
+                            descriptor = _node_media_descriptor(source_node_output)
                         media_payload = self.app.comfy_client.get_view_media(
                             filename=descriptor["filename"],
                             subfolder=descriptor["subfolder"],
