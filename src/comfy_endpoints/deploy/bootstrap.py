@@ -435,7 +435,8 @@ def run_bootstrap(
         f"--api-key {shlex.quote(api_key)} "
         f"--contract-path {shlex.quote(str(contract_path))} "
         f"--workflow-path {shlex.quote(str(workflow_path))} "
-        "--comfy-url http://127.0.0.1:8188"
+        "--comfy-url http://127.0.0.1:8188 "
+        f"--state-db {shlex.quote(os.getenv('COMFY_ENDPOINTS_STATE_DB', '/opt/comfy_endpoints/runtime/jobs.db'))}"
     )
     if app_id:
         gateway_command = f"{gateway_command} --app-id {shlex.quote(app_id)}"

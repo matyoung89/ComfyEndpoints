@@ -12,8 +12,9 @@ from comfy_endpoints.gateway.server import GatewayApp, GatewayConfig, GatewayHan
 
 
 class _FakeComfyClient:
-    def __init__(self, outputs: dict):
+    def __init__(self, outputs: dict, skip_artifact_names: set[str] | None = None):
         self.outputs = outputs
+        self.skip_artifact_names = skip_artifact_names or set()
 
     def queue_prompt(self, prompt_payload: dict) -> str:
         prompt = prompt_payload.get("prompt", {})
@@ -30,6 +31,8 @@ class _FakeComfyClient:
                 job_id = str(node_inputs.get("ce_job_id", "")).strip()
                 artifacts_dir = str(node_inputs.get("ce_artifacts_dir", "")).strip()
                 if not output_name or not job_id or not artifacts_dir:
+                    continue
+                if output_name in self.skip_artifact_names:
                     continue
 
                 node_output = self.outputs.get(str(node_id), {})
@@ -203,6 +206,72 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
             artifact_path = Path(tmp_dir) / "artifacts" / job_id / "image"
             self.assertTrue(artifact_path.exists())
             self.assertEqual(artifact_path.read_text(encoding="utf-8"), str(image_file_id))
+
+    def test_job_fails_when_prompt_done_but_artifacts_missing(self) -> None:
+        previous_artifact_grace = os.environ.get("COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS")
+        previous_output_poll = os.environ.get("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS")
+        os.environ["COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS"] = "1"
+        os.environ["COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS"] = "0.1"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                comfy_outputs = {
+                    "9": {
+                        "images": [
+                            {"filename": "img.png", "subfolder": "", "type": "output"},
+                        ]
+                    }
+                }
+                app = self._build_app(
+                    Path(tmp_dir),
+                    contract_outputs=[{"name": "image", "type": "image/png", "node_id": "9"}],
+                    comfy_outputs=comfy_outputs,
+                )
+                app.comfy_client = _FakeComfyClient(
+                    comfy_outputs,
+                    skip_artifact_names={"image"},
+                )
+
+                body = json.dumps({"prompt": "hello"}).encode("utf-8")
+                run_request = (
+                    b"POST /run HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"x-api-key: secret\r\n"
+                    b"content-type: application/json\r\n"
+                    b"connection: close\r\n"
+                    + f"content-length: {len(body)}\r\n\r\n".encode("ascii")
+                    + body
+                )
+                _status, _headers, payload_body = self._round_trip(app, run_request)
+                run_payload = json.loads(payload_body.decode("utf-8"))
+                job_id = run_payload["job_id"]
+
+                terminal_payload = None
+                for _ in range(80):
+                    job_request = (
+                        f"GET /jobs/{job_id} HTTP/1.1\r\n".encode("ascii")
+                        + b"Host: localhost\r\n"
+                        + b"x-api-key: secret\r\n"
+                        + b"connection: close\r\n\r\n"
+                    )
+                    _job_status, _job_headers, job_body = self._round_trip(app, job_request)
+                    candidate = json.loads(job_body.decode("utf-8"))
+                    if candidate.get("state") in {"failed", "completed"}:
+                        terminal_payload = candidate
+                        break
+                    time.sleep(0.05)
+
+                assert terminal_payload is not None
+                self.assertEqual(terminal_payload["state"], "failed")
+                self.assertIn("MISSING_ARTIFACTS:image", str(terminal_payload.get("error", "")))
+        finally:
+            if previous_artifact_grace is None:
+                os.environ.pop("COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS", None)
+            else:
+                os.environ["COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS"] = previous_artifact_grace
+            if previous_output_poll is None:
+                os.environ.pop("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", None)
+            else:
+                os.environ["COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS"] = previous_output_poll
 
     def test_multi_output_mixed_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

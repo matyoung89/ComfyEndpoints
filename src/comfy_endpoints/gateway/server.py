@@ -480,7 +480,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 job_id=job_id,
             )
             prompt_id = self.app.comfy_client.queue_prompt(mapped_prompt)
-            result = self._resolve_contract_outputs(job_id)
+            self._wait_for_prompt_terminal(prompt_id)
+            artifact_grace_seconds = float(os.getenv("COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS", "20"))
+            result = self._resolve_contract_outputs(job_id, timeout_seconds=artifact_grace_seconds)
             self.app.job_store.mark_completed(
                 job_id,
                 {
@@ -498,8 +500,37 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self.app.job_store.mark_failed(job_id, f"SYSTEM_ERROR:{exc}")
 
-    def _resolve_contract_outputs(self, job_id: str) -> dict[str, object]:
-        timeout_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_TIMEOUT_SECONDS", "180"))
+    def _wait_for_prompt_terminal(self, prompt_id: str) -> None:
+        timeout_seconds = float(os.getenv("COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS", "900"))
+        poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
+        deadline = time.time() + timeout_seconds
+
+        while time.time() < deadline:
+            history_payload = self.app.comfy_client.get_history(prompt_id)
+            prompt_history = _extract_prompt_history(history_payload, prompt_id)
+            if not prompt_history:
+                time.sleep(max(0.2, poll_seconds))
+                continue
+
+            status = prompt_history.get("status")
+            if isinstance(status, dict):
+                status_str = str(status.get("status_str", "")).strip().lower()
+                completed = bool(status.get("completed", False))
+                if completed or status_str in {"success", "succeeded", "completed"}:
+                    return
+                if status_str in {"failed", "error", "execution_error", "crashed"}:
+                    raise OutputResolutionError(f"PROMPT_FAILED:{status_str}")
+            elif isinstance(prompt_history.get("outputs"), dict):
+                # Some Comfy builds don't provide status details; outputs imply terminal.
+                return
+
+            time.sleep(max(0.2, poll_seconds))
+
+        raise OutputResolutionError(
+            f"PROMPT_TIMEOUT:history_not_terminal:{prompt_id}"
+        )
+
+    def _resolve_contract_outputs(self, job_id: str, timeout_seconds: float) -> dict[str, object]:
         poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
         deadline = time.time() + timeout_seconds
         expected_output_names = [field.name for field in self.app.contract.outputs]
@@ -525,8 +556,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
             return result
 
+        missing = [
+            name
+            for name in expected_output_names
+            if name not in self.app.job_store.read_output_artifacts(job_id)
+        ]
         raise OutputResolutionError(
-            "OUTPUT_TIMEOUT:missing_artifacts:" + ",".join(expected_output_names)
+            "MISSING_ARTIFACTS:" + ",".join(sorted(missing))
         )
 
 

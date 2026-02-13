@@ -73,7 +73,7 @@ class GatewayOutputResolutionTest(unittest.TestCase):
                 },
             )
             handler = self._handler_for_app(app)
-            result = handler._resolve_contract_outputs(job_id)
+            result = handler._resolve_contract_outputs(job_id, timeout_seconds=1)
 
             self.assertIn("image", result)
             self.assertEqual(result["image"], "fid_generated")
@@ -94,7 +94,20 @@ class GatewayOutputResolutionTest(unittest.TestCase):
             handler = self._handler_for_app(app)
 
             with self.assertRaisesRegex(OutputResolutionError, "OUTPUT_TYPE_ERROR"):
-                handler._resolve_contract_outputs(job_id)
+                handler._resolve_contract_outputs(job_id, timeout_seconds=1)
+
+    def test_missing_artifacts_reports_explicit_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app = self._build_app(
+                root,
+                contract_outputs=[
+                    {"name": "image", "type": "image/png", "node_id": "9"},
+                ],
+            )
+            handler = self._handler_for_app(app)
+            with self.assertRaisesRegex(OutputResolutionError, "^MISSING_ARTIFACTS:image$"):
+                handler._resolve_contract_outputs("job-3", timeout_seconds=0.01)
 
 
 if __name__ == "__main__":
