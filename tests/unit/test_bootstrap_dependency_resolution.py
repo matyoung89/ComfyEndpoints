@@ -7,6 +7,7 @@ from unittest import mock
 
 from comfy_endpoints.deploy.bootstrap import (
     MissingModelRequirement,
+    _fetch_manager_default_model_list,
     _install_missing_models,
     _iter_model_entries,
     _missing_models_from_object_info,
@@ -80,6 +81,33 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
             mocked_download.assert_called_once()
             target_path = mocked_download.call_args.args[1]
             self.assertEqual(str(target_path), str(root / "models" / "text_encoders" / "clip_l.safetensors"))
+
+    def test_install_missing_models_falls_back_to_default_catalog(self) -> None:
+        class EmptyManagerClient:
+            def get_external_models(self):
+                raise ComfyClientError("unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            requirements = [MissingModelRequirement(input_name="unet_name", filename="flux1-schnell.safetensors")]
+            fallback_payload = {
+                "models": [
+                    {
+                        "filename": "flux1-schnell.safetensors",
+                        "url": "https://example.com/flux1-schnell.safetensors",
+                        "type": "unet",
+                    }
+                ]
+            }
+            with mock.patch(
+                "comfy_endpoints.deploy.bootstrap._fetch_manager_default_model_list",
+                return_value=fallback_payload,
+            ):
+                with mock.patch("comfy_endpoints.deploy.bootstrap._download_file") as mocked_download:
+                    count = _install_missing_models(EmptyManagerClient(), requirements, root)
+
+            self.assertEqual(count, 1)
+            mocked_download.assert_called_once()
 
     def test_missing_models_parse_from_object_info_dropdown_mismatch(self) -> None:
         prompt_payload = {

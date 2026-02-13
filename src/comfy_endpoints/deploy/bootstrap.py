@@ -266,6 +266,14 @@ def _download_file(url: str, target_path: Path) -> None:
     tmp_path.replace(target_path)
 
 
+def _fetch_manager_default_model_list() -> object:
+    url = "https://raw.githubusercontent.com/Comfy-Org/ComfyUI-Manager/main/model-list.json"
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=60) as response:
+        body = response.read().decode("utf-8")
+    return json.loads(body or "{}")
+
+
 def _install_missing_models(
     comfy_client: ComfyClient,
     requirements: list[MissingModelRequirement],
@@ -274,13 +282,38 @@ def _install_missing_models(
     if not requirements:
         return 0
 
+    entries: list[dict] = []
     try:
         external_payload = comfy_client.get_external_models()
-    except ComfyClientError:
-        return 0
+        entries = _iter_model_entries(external_payload)
+        if entries:
+            print(
+                f"[bootstrap] manager external catalog entries={len(entries)}",
+                file=sys.stderr,
+            )
+    except ComfyClientError as exc:
+        print(
+            f"[bootstrap] manager external catalog unavailable: {exc}",
+            file=sys.stderr,
+        )
 
-    entries = _iter_model_entries(external_payload)
     if not entries:
+        try:
+            fallback_payload = _fetch_manager_default_model_list()
+            entries = _iter_model_entries(fallback_payload)
+            if entries:
+                print(
+                    f"[bootstrap] fallback model catalog entries={len(entries)}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[bootstrap] fallback model catalog unavailable: {exc}",
+                file=sys.stderr,
+            )
+
+    if not entries:
+        print("[bootstrap] no model catalog entries available", file=sys.stderr)
         return 0
 
     installed_count = 0
@@ -291,6 +324,10 @@ def _install_missing_models(
                 selected = item
                 break
         if not selected:
+            print(
+                f"[bootstrap] no catalog match for required model filename={requirement.filename}",
+                file=sys.stderr,
+            )
             continue
 
         model_dir = _target_model_dir(requirement, selected.get("type", ""))
@@ -389,6 +426,12 @@ def run_bootstrap(
                     missing_models = _missing_models_from_object_info(
                         prompt_payload=preflight_payload,
                         object_info_payload=object_info_payload,
+                    )
+                if missing_models:
+                    print(
+                        "[bootstrap] detected missing models: "
+                        + ", ".join(f"{item.input_name}={item.filename}" for item in missing_models),
+                        file=sys.stderr,
                     )
                 if not missing_models or attempt == max_preflight_attempts:
                     raise
