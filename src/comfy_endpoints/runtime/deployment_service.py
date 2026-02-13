@@ -134,6 +134,8 @@ class DeploymentService:
         env["COMFY_ENDPOINTS_CONTRACT_JSON"] = json.dumps(asdict(contract))
         env["COMFY_ENDPOINTS_WORKFLOW_PATH"] = "/opt/comfy_endpoints/runtime/workflow.json"
         env["COMFY_ENDPOINTS_WORKFLOW_JSON"] = workflow_json
+        env["COMFY_ENDPOINTS_STATE_DB"] = "/opt/comfy_endpoints/runtime/jobs.db"
+        env["COMFY_ENDPOINTS_ARTIFACTS_DIR"] = "/opt/comfy_endpoints/runtime/artifacts"
         mounts = [{"source": "cache", "target": "/cache"}]
 
         deployment_id = ""

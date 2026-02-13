@@ -134,6 +134,20 @@ def _extract_prompt_history(history_payload: dict, prompt_id: str) -> dict | Non
     return None
 
 
+def _is_prompt_history_terminal(prompt_history: dict) -> bool:
+    status = prompt_history.get("status")
+    if isinstance(status, dict):
+        completed = status.get("completed")
+        if isinstance(completed, bool) and completed:
+            return True
+
+        status_str = str(status.get("status_str", "")).strip().lower()
+        if status_str in {"success", "succeeded", "completed", "failed", "error"}:
+            return True
+
+    return False
+
+
 def _first_list_item(value: object) -> object | None:
     if isinstance(value, list) and value:
         return value[0]
@@ -364,12 +378,27 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json_response(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
                 return
 
+            output_payload = record.output_payload
+            if record.state == "completed":
+                artifact_outputs = self.app.job_store.read_output_artifacts(job_id)
+                if artifact_outputs:
+                    if isinstance(output_payload, dict):
+                        output_payload = dict(output_payload)
+                    else:
+                        output_payload = {}
+
+                    existing_result = output_payload.get("result")
+                    if isinstance(existing_result, dict):
+                        output_payload["result"] = artifact_outputs
+                    else:
+                        output_payload = {"result": artifact_outputs}
+
             self._json_response(
                 HTTPStatus.OK,
                 {
                     "job_id": record.job_id,
                     "state": record.state,
-                    "output": record.output_payload,
+                    "output": output_payload,
                     "error": record.error,
                 },
             )
@@ -448,9 +477,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 workflow_payload=self.app.workflow,
                 contract=self.app.contract,
                 input_payload=payload,
+                job_id=job_id,
             )
             prompt_id = self.app.comfy_client.queue_prompt(mapped_prompt)
-            result = self._resolve_contract_outputs(prompt_id)
+            result = self._resolve_contract_outputs(job_id)
             self.app.job_store.mark_completed(
                 job_id,
                 {
@@ -468,78 +498,36 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self.app.job_store.mark_failed(job_id, f"SYSTEM_ERROR:{exc}")
 
-    def _resolve_contract_outputs(self, prompt_id: str) -> dict[str, object]:
+    def _resolve_contract_outputs(self, job_id: str) -> dict[str, object]:
         timeout_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_TIMEOUT_SECONDS", "180"))
         poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
         deadline = time.time() + timeout_seconds
-        last_detail = "OUTPUT_RESOLUTION_ERROR:history_not_ready"
+        expected_output_names = [field.name for field in self.app.contract.outputs]
 
         while time.time() < deadline:
-            history_payload = self.app.comfy_client.get_history(prompt_id)
-            prompt_history = _extract_prompt_history(history_payload, prompt_id)
-            if not prompt_history:
+            artifacts = self.app.job_store.read_output_artifacts(job_id)
+            missing = [name for name in expected_output_names if name not in artifacts]
+            if missing:
                 time.sleep(max(0.2, poll_seconds))
                 continue
 
-            outputs = prompt_history.get("outputs")
-            if not isinstance(outputs, dict):
-                last_detail = "OUTPUT_RESOLUTION_ERROR:history_outputs_missing"
-                time.sleep(max(0.2, poll_seconds))
-                continue
-
-            try:
-                result: dict[str, object] = {}
-                for field in self.app.contract.outputs:
-                    node_output = outputs.get(field.node_id)
-                    if not isinstance(node_output, dict):
+            result: dict[str, object] = {}
+            for field in self.app.contract.outputs:
+                raw_value = artifacts[field.name]
+                if _is_media_contract_type(field.type):
+                    if not isinstance(raw_value, str) or not raw_value.strip():
                         raise OutputResolutionError(
-                            f"OUTPUT_RESOLUTION_ERROR:missing_output_node:{field.node_id}"
+                            f"OUTPUT_TYPE_ERROR:media_output_must_be_file_id:{field.name}"
                         )
-
-                    if _is_media_contract_type(field.type):
-                        try:
-                            descriptor = _node_media_descriptor(node_output)
-                        except OutputResolutionError:
-                            source_node_id = _api_output_linked_source_node_id(self.app.workflow, field.node_id)
-                            if not source_node_id:
-                                raise
-                            source_node_output = outputs.get(source_node_id)
-                            if not isinstance(source_node_output, dict):
-                                raise
-                            descriptor = _node_media_descriptor(source_node_output)
-                        media_payload = self.app.comfy_client.get_view_media(
-                            filename=descriptor["filename"],
-                            subfolder=descriptor["subfolder"],
-                            media_type=descriptor["type"],
-                        )
-                        original_name = descriptor["filename"]
-                        try:
-                            record = self.app.job_store.create_file(
-                                content=media_payload,
-                                media_type=field.type,
-                                source="generated",
-                                app_id=self.app.app_id,
-                                original_name=original_name,
-                            )
-                        except ValueError as exc:
-                            raise OutputResolutionError(f"FILE_STORE_ERROR:{exc}") from exc
-                        result[field.name] = record.file_id
-                        continue
-
-                    raw_value = _node_scalar_value(node_output)
-                    result[field.name] = _coerce_scalar_output(field.type, raw_value)
-
-                return result
-            except OutputResolutionError as exc:
-                last_detail = str(exc)
-                if "missing_output_node" in last_detail or "missing_media_descriptor" in last_detail:
-                    time.sleep(max(0.2, poll_seconds))
+                    result[field.name] = raw_value.strip()
                     continue
-                raise
-            except ComfyClientError as exc:
-                raise OutputResolutionError(f"OUTPUT_RESOLUTION_ERROR:{exc}") from exc
+                result[field.name] = _coerce_scalar_output(field.type, raw_value)
 
-        raise OutputResolutionError(f"OUTPUT_TIMEOUT:{last_detail}")
+            return result
+
+        raise OutputResolutionError(
+            "OUTPUT_TIMEOUT:missing_artifacts:" + ",".join(expected_output_names)
+        )
 
 
 def run_gateway(config: GatewayConfig) -> None:

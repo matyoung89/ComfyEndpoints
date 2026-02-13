@@ -469,14 +469,40 @@ def _poll_job_until_terminal(
     timeout_seconds: int,
     poll_seconds: float,
 ) -> dict[str, Any]:
+    terminal_states = {
+        "completed",
+        "succeeded",
+        "failed",
+        "error",
+        "canceled",
+        "cancelled",
+        "timed_out",
+        "timeout",
+    }
     deadline = time.time() + timeout_seconds
+    last_response: dict[str, Any] | None = None
+    last_error: str | None = None
     while True:
-        response = _request_json(endpoint_url=endpoint_url, app_id=app_id, path=f"/jobs/{job_id}")
-        state = str(response.get("state", "")).lower()
-        if state in {"completed", "failed"}:
+        now = time.time()
+        if now > deadline:
+            state_hint = ""
+            if last_response is not None:
+                state_hint = f", last_state={last_response.get('state', '')}"
+            error_hint = f", last_error={last_error}" if last_error else ""
+            raise RuntimeError(f"Timed out waiting for job_id={job_id}{state_hint}{error_hint}")
+
+        try:
+            response = _request_json(endpoint_url=endpoint_url, app_id=app_id, path=f"/jobs/{job_id}")
+            last_response = response
+            last_error = None
+        except RuntimeError as exc:
+            last_error = str(exc)
+            time.sleep(max(0.2, poll_seconds))
+            continue
+
+        state = str(response.get("state", "")).strip().lower()
+        if state in terminal_states:
             return response
-        if time.time() > deadline:
-            raise RuntimeError(f"Timed out waiting for job_id={job_id}")
         time.sleep(max(0.2, poll_seconds))
 
 

@@ -69,6 +69,24 @@ class JobStoreTest(unittest.TestCase):
             self.assertNotEqual(page_one[0].file_id, page_two[0].file_id)
             self.assertIsNone(page_two_cursor)
 
+    def test_output_artifacts_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = JobStore(Path(tmp_dir) / "jobs.db")
+            job_id = store.create({"prompt": "hello"})
+            outputs = {
+                "image": "fid_generated",
+                "caption": "done",
+                "score": 1.25,
+                "meta": {"seed": 42},
+            }
+            store.write_output_artifacts(job_id, outputs)
+
+            loaded = store.read_output_artifacts(job_id)
+            self.assertEqual(loaded["image"], "fid_generated")
+            self.assertEqual(loaded["caption"], "done")
+            self.assertEqual(loaded["score"], 1.25)
+            self.assertEqual(loaded["meta"], {"seed": 42})
+
 
 if __name__ == "__main__":
     unittest.main()

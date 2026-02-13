@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import tempfile
 import time
@@ -14,7 +15,36 @@ class _FakeComfyClient:
     def __init__(self, outputs: dict):
         self.outputs = outputs
 
-    def queue_prompt(self, _prompt_payload: dict) -> str:
+    def queue_prompt(self, prompt_payload: dict) -> str:
+        prompt = prompt_payload.get("prompt", {})
+        if isinstance(prompt, dict):
+            for node_id, node in prompt.items():
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("class_type", "")).strip().lower() != "apioutput":
+                    continue
+                node_inputs = node.get("inputs")
+                if not isinstance(node_inputs, dict):
+                    continue
+                output_name = str(node_inputs.get("name", "")).strip()
+                job_id = str(node_inputs.get("ce_job_id", "")).strip()
+                artifacts_dir = str(node_inputs.get("ce_artifacts_dir", "")).strip()
+                if not output_name or not job_id or not artifacts_dir:
+                    continue
+
+                node_output = self.outputs.get(str(node_id), {})
+                value = ""
+                if isinstance(node_output, dict):
+                    values = node_output.get("value")
+                    if isinstance(values, list) and values:
+                        value = values[0]
+                    elif "value" in node_output and not isinstance(node_output["value"], list):
+                        value = node_output["value"]
+                    elif "images" in node_output:
+                        value = f"fid_mock_{output_name}"
+                artifact_path = Path(artifacts_dir) / job_id / output_name
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(str(value), encoding="utf-8")
         return "prompt-1"
 
     def get_history(self, _prompt_id: str) -> dict:
@@ -75,8 +105,23 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
         return status_code, headers, body
 
     def _build_app(self, root: Path, contract_outputs: list[dict], comfy_outputs: dict) -> GatewayApp:
+        os.environ["COMFY_ENDPOINTS_ARTIFACTS_DIR"] = str(root / "artifacts")
+        os.environ["COMFY_ENDPOINTS_STATE_DB"] = str(root / "jobs.db")
         contract_path = root / "workflow.contract.json"
         workflow_path = root / "workflow.json"
+        prompt_nodes = {
+            "1": {"class_type": "ApiInput", "inputs": {"value": ""}},
+        }
+        for item in contract_outputs:
+            node_id = str(item.get("node_id", ""))
+            prompt_nodes[node_id] = {
+                "class_type": "ApiOutput",
+                "inputs": {
+                    "name": str(item.get("name", "")),
+                    "type": str(item.get("type", "")),
+                    "value": "",
+                },
+            }
         contract_path.write_text(
             json.dumps(
                 {
@@ -89,7 +134,7 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
             encoding="utf-8",
         )
         workflow_path.write_text(
-            json.dumps({"prompt": {"1": {"class_type": "ApiInput", "inputs": {"value": ""}}}}),
+            json.dumps({"prompt": prompt_nodes}),
             encoding="utf-8",
         )
         app = GatewayApp(
@@ -155,6 +200,9 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
             assert terminal_payload is not None
             image_file_id = terminal_payload["output"]["result"]["image"]
             self.assertTrue(str(image_file_id).startswith("fid_"))
+            artifact_path = Path(tmp_dir) / "artifacts" / job_id / "image"
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact_path.read_text(encoding="utf-8"), str(image_file_id))
 
     def test_multi_output_mixed_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -207,6 +255,12 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
             result = terminal_payload["output"]["result"]
             self.assertTrue(str(result["image"]).startswith("fid_"))
             self.assertEqual(result["caption"], "done")
+            image_artifact = Path(tmp_dir) / "artifacts" / job_id / "image"
+            caption_artifact = Path(tmp_dir) / "artifacts" / job_id / "caption"
+            self.assertTrue(image_artifact.exists())
+            self.assertTrue(caption_artifact.exists())
+            self.assertEqual(image_artifact.read_text(encoding="utf-8"), str(result["image"]))
+            self.assertEqual(caption_artifact.read_text(encoding="utf-8"), "done")
 
 
 if __name__ == "__main__":

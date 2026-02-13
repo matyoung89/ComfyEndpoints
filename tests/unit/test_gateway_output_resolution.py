@@ -4,25 +4,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from comfy_endpoints.gateway.server import GatewayApp, GatewayConfig, GatewayHandler, OutputResolutionError
-
-
-class _FakeComfyClient:
-    def __init__(self, history_payload: dict, media_payload: bytes = b"img"):
-        self.history_payload = history_payload
-        self.media_payload = media_payload
-
-    def queue_prompt(self, _prompt_payload: dict) -> str:
-        return "prompt-1"
-
-    def get_history(self, _prompt_id: str) -> dict:
-        return self.history_payload
-
-    def get_view_media(self, filename: str, subfolder: str, media_type: str) -> bytes:
-        _ = (filename, subfolder, media_type)
-        return self.media_payload
 
 
 class GatewayOutputResolutionTest(unittest.TestCase):
@@ -80,37 +63,22 @@ class GatewayOutputResolutionTest(unittest.TestCase):
                     {"name": "score", "type": "number", "node_id": "11"},
                 ],
             )
-            app.comfy_client = _FakeComfyClient(
+            job_id = "job-1"
+            app.job_store.write_output_artifacts(
+                job_id,
                 {
-                    "prompt-1": {
-                        "outputs": {
-                            "9": {
-                                "images": [
-                                    {
-                                        "filename": "flux.png",
-                                        "subfolder": "",
-                                        "type": "output",
-                                    }
-                                ]
-                            },
-                            "10": {"value": ["hello"]},
-                            "11": {"value": ["1.25"]},
-                        }
-                    }
-                }
+                    "image": "fid_generated",
+                    "caption": "hello",
+                    "score": 1.25,
+                },
             )
             handler = self._handler_for_app(app)
-            result = handler._resolve_contract_outputs("prompt-1")
+            result = handler._resolve_contract_outputs(job_id)
 
             self.assertIn("image", result)
-            self.assertTrue(str(result["image"]).startswith("fid_"))
+            self.assertEqual(result["image"], "fid_generated")
             self.assertEqual(result["caption"], "hello")
             self.assertEqual(result["score"], 1.25)
-
-            record = app.job_store.get_file(str(result["image"]))
-            assert record is not None
-            self.assertEqual(record.source, "generated")
-            self.assertEqual(record.app_id, "demo")
 
     def test_type_coercion_error_fails_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -121,11 +89,12 @@ class GatewayOutputResolutionTest(unittest.TestCase):
                     {"name": "flag", "type": "boolean", "node_id": "10"},
                 ],
             )
-            app.comfy_client = _FakeComfyClient({"prompt-1": {"outputs": {"10": {"value": ["nope"]}}}})
+            job_id = "job-2"
+            app.job_store.write_output_artifacts(job_id, {"flag": "nope"})
             handler = self._handler_for_app(app)
 
             with self.assertRaisesRegex(OutputResolutionError, "OUTPUT_TYPE_ERROR"):
-                handler._resolve_contract_outputs("prompt-1")
+                handler._resolve_contract_outputs(job_id)
 
 
 if __name__ == "__main__":
