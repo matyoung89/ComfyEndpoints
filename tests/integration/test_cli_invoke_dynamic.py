@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from comfy_endpoints.cli.main import main
+from comfy_endpoints.cli.main import _poll_job_until_terminal, main
 from comfy_endpoints.models import DeploymentRecord, DeploymentState, ProviderName
 from comfy_endpoints.runtime.state_store import DeploymentStore
 
@@ -140,6 +140,63 @@ class CliInvokeDynamicIntegrationTest(unittest.TestCase):
                 self.assertIn("--input-prompt", values)
                 self.assertIn("--input-image-file", values)
                 self.assertIn("--input-image-id", values)
+
+    def test_poll_job_until_terminal_accepts_succeeded_state(self) -> None:
+        with mock.patch(
+            "comfy_endpoints.cli.main._request_json",
+            side_effect=[
+                {"job_id": "job-1", "state": "running"},
+                {"job_id": "job-1", "state": "succeeded", "output": {"image": "fid_1"}},
+            ],
+        ):
+            with mock.patch("comfy_endpoints.cli.main.time.sleep"):
+                result = _poll_job_until_terminal(
+                    endpoint_url="https://demo.example.com",
+                    app_id="demo",
+                    job_id="job-1",
+                    timeout_seconds=30,
+                    poll_seconds=0.2,
+                )
+        self.assertEqual(result["state"], "succeeded")
+
+    def test_poll_job_until_terminal_retries_transient_request_errors(self) -> None:
+        with mock.patch(
+            "comfy_endpoints.cli.main._request_json",
+            side_effect=[
+                RuntimeError("HTTP 502 for /jobs/job-2"),
+                {"job_id": "job-2", "state": "completed", "output": {"image": "fid_2"}},
+            ],
+        ):
+            with mock.patch("comfy_endpoints.cli.main.time.sleep"):
+                result = _poll_job_until_terminal(
+                    endpoint_url="https://demo.example.com",
+                    app_id="demo",
+                    job_id="job-2",
+                    timeout_seconds=30,
+                    poll_seconds=0.2,
+                )
+        self.assertEqual(result["state"], "completed")
+
+    def test_poll_job_until_terminal_timeout_includes_last_state(self) -> None:
+        with mock.patch(
+            "comfy_endpoints.cli.main._request_json",
+            return_value={"job_id": "job-3", "state": "running"},
+        ):
+            with mock.patch("comfy_endpoints.cli.main.time.sleep"):
+                with mock.patch(
+                    "comfy_endpoints.cli.main.time.time",
+                    side_effect=[0.0, 0.1, 1.1],
+                ):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        _poll_job_until_terminal(
+                            endpoint_url="https://demo.example.com",
+                            app_id="demo",
+                            job_id="job-3",
+                            timeout_seconds=1,
+                            poll_seconds=0.2,
+                        )
+        self.assertIn("Timed out waiting for job_id=job-3", str(ctx.exception))
+        self.assertIn("last_state=running", str(ctx.exception))
 
 
 if __name__ == "__main__":

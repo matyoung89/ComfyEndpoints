@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
+import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +29,7 @@ class GatewayConfig:
     contract_path: Path
     workflow_path: Path
     state_db: Path
+    app_id: str | None = None
 
 
 def is_public_route(method: str, path: str) -> bool:
@@ -49,6 +52,7 @@ def is_authorized(provided_key: str, expected_key: str) -> bool:
 class GatewayApp:
     def __init__(self, config: GatewayConfig):
         self.config = config
+        self.app_id = config.app_id or os.getenv("COMFY_ENDPOINTS_APP_ID", "").strip() or None
         self.contract = parse_workflow_contract(config.contract_path)
         self.workflow = json.loads(config.workflow_path.read_text(encoding="utf-8"))
         self.job_store = JobStore(config.state_db)
@@ -66,6 +70,163 @@ class GatewayApp:
             return False, f"unexpected_inputs:{','.join(extra)}"
 
         return True, "ok"
+
+
+MEDIA_PREFIXES = ("image/", "video/", "audio/", "file/")
+SCALAR_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
+
+
+class OutputResolutionError(ValueError):
+    pass
+
+
+def _is_media_contract_type(type_name: str) -> bool:
+    normalized = type_name.strip().lower()
+    return any(normalized.startswith(prefix) for prefix in MEDIA_PREFIXES)
+
+
+def _coerce_scalar_output(type_name: str, raw_value: object) -> object:
+    normalized = type_name.strip().lower()
+    if normalized == "string":
+        if isinstance(raw_value, str):
+            return raw_value
+        return str(raw_value)
+    if normalized == "integer":
+        if isinstance(raw_value, bool):
+            raise OutputResolutionError("OUTPUT_TYPE_ERROR:cannot_coerce_bool_to_integer")
+        return int(raw_value)
+    if normalized == "number":
+        if isinstance(raw_value, bool):
+            raise OutputResolutionError("OUTPUT_TYPE_ERROR:cannot_coerce_bool_to_number")
+        return float(raw_value)
+    if normalized == "boolean":
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, str):
+            lowered = raw_value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        if isinstance(raw_value, (int, float)):
+            return bool(raw_value)
+        raise OutputResolutionError("OUTPUT_TYPE_ERROR:cannot_coerce_to_boolean")
+    if normalized == "object":
+        if isinstance(raw_value, dict):
+            return raw_value
+        raise OutputResolutionError("OUTPUT_TYPE_ERROR:expected_object")
+    if normalized == "array":
+        if isinstance(raw_value, list):
+            return raw_value
+        raise OutputResolutionError("OUTPUT_TYPE_ERROR:expected_array")
+    raise OutputResolutionError(f"OUTPUT_TYPE_ERROR:unsupported_type:{type_name}")
+
+
+def _extract_prompt_history(history_payload: dict, prompt_id: str) -> dict | None:
+    if prompt_id in history_payload and isinstance(history_payload[prompt_id], dict):
+        return history_payload[prompt_id]
+
+    for value in history_payload.values():
+        if isinstance(value, dict) and isinstance(value.get("prompt_id"), str):
+            if str(value.get("prompt_id")) == prompt_id:
+                return value
+
+    return None
+
+
+def _is_prompt_history_terminal(prompt_history: dict) -> bool:
+    status = prompt_history.get("status")
+    if isinstance(status, dict):
+        completed = status.get("completed")
+        if isinstance(completed, bool) and completed:
+            return True
+
+        status_str = str(status.get("status_str", "")).strip().lower()
+        if status_str in {"success", "succeeded", "completed", "failed", "error"}:
+            return True
+
+    return False
+
+
+def _first_list_item(value: object) -> object | None:
+    if isinstance(value, list) and value:
+        return value[0]
+    return None
+
+
+def _node_scalar_value(node_output: dict) -> object:
+    api_output = node_output.get("api_output")
+    if isinstance(api_output, dict) and "value" in api_output:
+        return api_output["value"]
+
+    candidates: tuple[str, ...] = ("value", "values", "text", "result")
+    for key in candidates:
+        if key not in node_output:
+            continue
+        raw = node_output[key]
+        first = _first_list_item(raw)
+        if first is not None:
+            return first
+        return raw
+
+    raise OutputResolutionError("OUTPUT_RESOLUTION_ERROR:missing_scalar_value")
+
+
+def _node_media_descriptor(node_output: dict) -> dict[str, str]:
+    media_lists: tuple[str, ...] = ("images", "videos", "audios", "files")
+    for key in media_lists:
+        raw = node_output.get(key)
+        first = _first_list_item(raw)
+        if not isinstance(first, dict):
+            continue
+
+        filename = str(first.get("filename", "")).strip()
+        subfolder = str(first.get("subfolder", "")).strip()
+        media_type = str(first.get("type", "")).strip()
+        if not filename:
+            continue
+        return {
+            "filename": filename,
+            "subfolder": subfolder,
+            "type": media_type,
+        }
+
+    raise OutputResolutionError("OUTPUT_RESOLUTION_ERROR:missing_media_descriptor")
+
+
+def _prompt_graph_from_workflow(workflow_payload: dict) -> dict[str, dict]:
+    prompt = workflow_payload.get("prompt")
+    if isinstance(prompt, dict):
+        normalized: dict[str, dict] = {}
+        for node_id, node in prompt.items():
+            if isinstance(node, dict):
+                normalized[str(node_id)] = node
+        return normalized
+
+    if all(isinstance(key, str) and isinstance(value, dict) for key, value in workflow_payload.items()):
+        if any("class_type" in value for value in workflow_payload.values()):
+            return workflow_payload
+
+    return {}
+
+
+def _api_output_linked_source_node_id(workflow_payload: dict, node_id: str) -> str | None:
+    prompt = _prompt_graph_from_workflow(workflow_payload)
+    node = prompt.get(node_id)
+    if not isinstance(node, dict):
+        return None
+
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return None
+
+    for key in ("image", "value"):
+        link = inputs.get(key)
+        if isinstance(link, list) and link:
+            source_node_id = link[0]
+            if isinstance(source_node_id, (str, int)):
+                return str(source_node_id)
+    return None
 
 class GatewayHandler(BaseHTTPRequestHandler):
     app: GatewayApp
@@ -217,12 +378,27 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json_response(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
                 return
 
+            output_payload = record.output_payload
+            if record.state == "completed":
+                artifact_outputs = self.app.job_store.read_output_artifacts(job_id)
+                if artifact_outputs:
+                    if isinstance(output_payload, dict):
+                        output_payload = dict(output_payload)
+                    else:
+                        output_payload = {}
+
+                    existing_result = output_payload.get("result")
+                    if isinstance(existing_result, dict):
+                        output_payload["result"] = artifact_outputs
+                    else:
+                        output_payload = {"result": artifact_outputs}
+
             self._json_response(
                 HTTPStatus.OK,
                 {
                     "job_id": record.job_id,
                     "state": record.state,
-                    "output": record.output_payload,
+                    "output": output_payload,
                     "error": record.error,
                 },
             )
@@ -301,21 +477,93 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 workflow_payload=self.app.workflow,
                 contract=self.app.contract,
                 input_payload=payload,
+                job_id=job_id,
             )
             prompt_id = self.app.comfy_client.queue_prompt(mapped_prompt)
+            self._wait_for_prompt_terminal(prompt_id)
+            artifact_grace_seconds = float(os.getenv("COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS", "20"))
+            result = self._resolve_contract_outputs(job_id, timeout_seconds=artifact_grace_seconds)
             self.app.job_store.mark_completed(
                 job_id,
                 {
                     "prompt_id": prompt_id,
-                    "status": "submitted",
+                    "status": "completed",
+                    "result": result,
                 },
             )
         except PromptMappingError as exc:
             self.app.job_store.mark_failed(job_id, f"VALIDATION_ERROR:{exc}")
+        except OutputResolutionError as exc:
+            self.app.job_store.mark_failed(job_id, str(exc))
         except ComfyClientError as exc:
             self.app.job_store.mark_failed(job_id, f"QUEUE_ERROR:{exc}")
         except Exception as exc:  # noqa: BLE001
             self.app.job_store.mark_failed(job_id, f"SYSTEM_ERROR:{exc}")
+
+    def _wait_for_prompt_terminal(self, prompt_id: str) -> None:
+        timeout_seconds = float(os.getenv("COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS", "900"))
+        poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
+        deadline = time.time() + timeout_seconds
+
+        while time.time() < deadline:
+            history_payload = self.app.comfy_client.get_history(prompt_id)
+            prompt_history = _extract_prompt_history(history_payload, prompt_id)
+            if not prompt_history:
+                time.sleep(max(0.2, poll_seconds))
+                continue
+
+            status = prompt_history.get("status")
+            if isinstance(status, dict):
+                status_str = str(status.get("status_str", "")).strip().lower()
+                completed = bool(status.get("completed", False))
+                if completed or status_str in {"success", "succeeded", "completed"}:
+                    return
+                if status_str in {"failed", "error", "execution_error", "crashed"}:
+                    raise OutputResolutionError(f"PROMPT_FAILED:{status_str}")
+            elif isinstance(prompt_history.get("outputs"), dict):
+                # Some Comfy builds don't provide status details; outputs imply terminal.
+                return
+
+            time.sleep(max(0.2, poll_seconds))
+
+        raise OutputResolutionError(
+            f"PROMPT_TIMEOUT:history_not_terminal:{prompt_id}"
+        )
+
+    def _resolve_contract_outputs(self, job_id: str, timeout_seconds: float) -> dict[str, object]:
+        poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
+        deadline = time.time() + timeout_seconds
+        expected_output_names = [field.name for field in self.app.contract.outputs]
+
+        while time.time() < deadline:
+            artifacts = self.app.job_store.read_output_artifacts(job_id)
+            missing = [name for name in expected_output_names if name not in artifacts]
+            if missing:
+                time.sleep(max(0.2, poll_seconds))
+                continue
+
+            result: dict[str, object] = {}
+            for field in self.app.contract.outputs:
+                raw_value = artifacts[field.name]
+                if _is_media_contract_type(field.type):
+                    if not isinstance(raw_value, str) or not raw_value.strip():
+                        raise OutputResolutionError(
+                            f"OUTPUT_TYPE_ERROR:media_output_must_be_file_id:{field.name}"
+                        )
+                    result[field.name] = raw_value.strip()
+                    continue
+                result[field.name] = _coerce_scalar_output(field.type, raw_value)
+
+            return result
+
+        missing = [
+            name
+            for name in expected_output_names
+            if name not in self.app.job_store.read_output_artifacts(job_id)
+        ]
+        raise OutputResolutionError(
+            "MISSING_ARTIFACTS:" + ",".join(sorted(missing))
+        )
 
 
 def run_gateway(config: GatewayConfig) -> None:
@@ -339,6 +587,7 @@ def main() -> int:
     parser.add_argument("--contract-path", required=True)
     parser.add_argument("--workflow-path", required=True)
     parser.add_argument("--state-db", default="/var/lib/comfy_endpoints/jobs.db")
+    parser.add_argument("--app-id", default=None)
     args = parser.parse_args()
 
     run_gateway(
@@ -350,6 +599,7 @@ def main() -> int:
             contract_path=Path(args.contract_path),
             workflow_path=Path(args.workflow_path),
             state_db=Path(args.state_db),
+            app_id=str(args.app_id).strip() if args.app_id else None,
         )
     )
     return 0

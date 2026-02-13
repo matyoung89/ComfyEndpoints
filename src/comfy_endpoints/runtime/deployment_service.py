@@ -17,6 +17,12 @@ from comfy_endpoints.runtime.state_store import DeploymentStore
 
 
 class DeploymentService:
+    _HF_ENV_KEYS = (
+        "HUGGINGFACE_TOKEN",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+    )
+
     def __init__(self, state_dir: Path):
         self.state_store = DeploymentStore(state_dir=state_dir)
         self.image_manager = ImageManager()
@@ -76,6 +82,20 @@ class DeploymentService:
         getter = getattr(provider, "get_logs", None)
         if not callable(getter):
             return ""
+
+    @staticmethod
+    def _is_bid_related_failure(detail: str) -> bool:
+        lowered = (detail or "").lower()
+        markers = (
+            "outbid",
+            "insufficient",
+            "no gpu",
+            "no workers",
+            "unable to bid",
+            "bid",
+            "capacity",
+        )
+        return any(marker in lowered for marker in markers)
         try:
             return str(getter(deployment_id, tail_lines=tail_lines) or "")
         except Exception:  # noqa: BLE001
@@ -103,6 +123,10 @@ class DeploymentService:
             )
         max_attempts = int(os.getenv("COMFY_ENDPOINTS_RUNPOD_MAX_DEPLOY_ATTEMPTS", "4"))
         env = dict(app_spec.env)
+        for key in self._HF_ENV_KEYS:
+            value = os.getenv(key, "").strip()
+            if value and key not in env:
+                env[key] = value
         workflow_json = app_spec.workflow_path.read_text(encoding="utf-8")
         env["COMFY_ENDPOINTS_APP_ID"] = app_spec.app_id
         env["COMFY_ENDPOINTS_CONTRACT_ID"] = contract.contract_id
@@ -110,6 +134,8 @@ class DeploymentService:
         env["COMFY_ENDPOINTS_CONTRACT_JSON"] = json.dumps(asdict(contract))
         env["COMFY_ENDPOINTS_WORKFLOW_PATH"] = "/opt/comfy_endpoints/runtime/workflow.json"
         env["COMFY_ENDPOINTS_WORKFLOW_JSON"] = workflow_json
+        env["COMFY_ENDPOINTS_STATE_DB"] = "/opt/comfy_endpoints/runtime/jobs.db"
+        env["COMFY_ENDPOINTS_ARTIFACTS_DIR"] = "/opt/comfy_endpoints/runtime/artifacts"
         mounts = [{"source": "cache", "target": "/cache"}]
 
         deployment_id = ""
@@ -204,13 +230,8 @@ class DeploymentService:
                 if status.state == DeploymentState.READY:
                     detail = f"{detail} ({endpoint_probe_detail})"
                 last_error = detail
-                outbid = "outbid" in detail.lower()
-                retryable_state = status.state in {
-                    DeploymentState.DEGRADED,
-                    DeploymentState.TERMINATED,
-                    DeploymentState.FAILED,
-                }
-                if attempt < max_attempts and (outbid or retryable_state):
+                bid_related_failure = self._is_bid_related_failure(detail)
+                if attempt < max_attempts and bid_related_failure:
                     if progress_callback:
                         progress_callback(f"[deploy] retrying with next profile due to: {detail}")
                     provider.destroy(deployment_id)
@@ -222,7 +243,7 @@ class DeploymentService:
                     provider.destroy(deployment_id)
                 except Exception:  # noqa: BLE001
                     pass
-                if attempt < max_attempts:
+                if attempt < max_attempts and self._is_bid_related_failure(last_error):
                     if progress_callback:
                         progress_callback(f"[deploy] retrying after error: {last_error}")
                     continue

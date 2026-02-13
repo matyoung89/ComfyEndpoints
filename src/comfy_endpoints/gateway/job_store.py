@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import sqlite3
+import threading
 import uuid
 from datetime import UTC, datetime
 from dataclasses import dataclass
@@ -39,11 +40,30 @@ class JobStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.file_storage_root = self.db_path.parent / "files"
         self.file_storage_root.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.artifact_storage_root = self.db_path.parent / "artifacts"
+        self.artifact_storage_root.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         self._init_schema()
 
+    def _execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+        with self._lock:
+            return self.conn.execute(sql, params)
+
+    def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> tuple | None:
+        with self._lock:
+            return self.conn.execute(sql, params).fetchone()
+
+    def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[tuple]:
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def _commit(self) -> None:
+        with self._lock:
+            self.conn.commit()
+
     def _init_schema(self) -> None:
-        self.conn.execute(
+        self._execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
@@ -54,7 +74,7 @@ class JobStore:
             )
             """
         )
-        self.conn.execute(
+        self._execute(
             """
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,40 +90,79 @@ class JobStore:
             )
             """
         )
-        self.conn.commit()
+        self._commit()
 
     def create(self, payload: dict) -> str:
         job_id = uuid.uuid4().hex
-        self.conn.execute(
+        self._execute(
             "INSERT INTO jobs (job_id, state, input_payload, output_payload, error) VALUES (?, ?, ?, ?, ?)",
             (job_id, "queued", json.dumps(payload), None, None),
         )
-        self.conn.commit()
+        self._commit()
         return job_id
 
     def mark_running(self, job_id: str) -> None:
-        self.conn.execute("UPDATE jobs SET state = ? WHERE job_id = ?", ("running", job_id))
-        self.conn.commit()
+        self._execute("UPDATE jobs SET state = ? WHERE job_id = ?", ("running", job_id))
+        self._commit()
 
     def mark_completed(self, job_id: str, output_payload: dict) -> None:
-        self.conn.execute(
+        self._execute(
             "UPDATE jobs SET state = ?, output_payload = ? WHERE job_id = ?",
             ("completed", json.dumps(output_payload), job_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def mark_failed(self, job_id: str, error: str) -> None:
-        self.conn.execute(
+        self._execute(
             "UPDATE jobs SET state = ?, error = ? WHERE job_id = ?",
             ("failed", error, job_id),
         )
-        self.conn.commit()
+        self._commit()
+
+    @staticmethod
+    def _sanitize_artifact_name(output_name: str) -> str:
+        sanitized = Path(output_name).name.strip()
+        if not sanitized:
+            raise ValueError("Output name is empty")
+        if sanitized in {".", ".."}:
+            raise ValueError("Invalid output name")
+        return sanitized
+
+    def _artifact_path(self, job_id: str, output_name: str) -> Path:
+        safe_name = self._sanitize_artifact_name(output_name)
+        return self.artifact_storage_root / job_id / safe_name
+
+    def write_output_artifacts(self, job_id: str, outputs: dict[str, object]) -> None:
+        target_dir = self.artifact_storage_root / job_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for output_name, value in outputs.items():
+            artifact_path = self._artifact_path(job_id, output_name)
+            if isinstance(value, str):
+                artifact_path.write_text(value, encoding="utf-8")
+                continue
+            artifact_path.write_text(json.dumps(value), encoding="utf-8")
+
+    def read_output_artifacts(self, job_id: str) -> dict[str, object]:
+        target_dir = self.artifact_storage_root / job_id
+        if not target_dir.exists() or not target_dir.is_dir():
+            return {}
+
+        resolved: dict[str, object] = {}
+        for artifact_path in sorted(target_dir.iterdir(), key=lambda item: item.name):
+            if not artifact_path.is_file():
+                continue
+            raw_value = artifact_path.read_text(encoding="utf-8")
+            try:
+                resolved[artifact_path.name] = json.loads(raw_value)
+            except json.JSONDecodeError:
+                resolved[artifact_path.name] = raw_value
+        return resolved
 
     def get(self, job_id: str) -> JobRecord | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT job_id, state, input_payload, output_payload, error FROM jobs WHERE job_id = ?",
             (job_id,),
-        ).fetchone()
+        )
         if not row:
             return None
 
@@ -150,7 +209,7 @@ class JobStore:
         digest = sha256(content).hexdigest()
         created_at = datetime.now(UTC).isoformat()
 
-        self.conn.execute(
+        self._execute(
             """
             INSERT INTO files (
                 file_id, storage_rel_path, media_type, size_bytes, sha256_hex, source, app_id, original_name, created_at
@@ -168,8 +227,8 @@ class JobStore:
                 created_at,
             ),
         )
-        self.conn.commit()
-        row_id = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        row_id = int(self._fetchone("SELECT last_insert_rowid()")[0])
+        self._commit()
         return FileRecord(
             file_id=file_id,
             media_type=content_media_type,
@@ -218,14 +277,14 @@ class JobStore:
         )
 
     def get_file(self, file_id: str) -> FileRecord | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             """
             SELECT id, file_id, storage_rel_path, media_type, size_bytes, sha256_hex, source, app_id, original_name, created_at
             FROM files
             WHERE file_id = ?
             """,
             (file_id,),
-        ).fetchone()
+        )
         if not row:
             return None
         return self._row_to_file_record(row)
@@ -264,7 +323,7 @@ class JobStore:
         query = f"{query} ORDER BY id DESC LIMIT ?"
         params.append(effective_limit + 1)
 
-        rows = self.conn.execute(query, tuple(params)).fetchall()
+        rows = self._fetchall(query, tuple(params))
         has_more = len(rows) > effective_limit
         visible_rows = rows[:effective_limit]
         records = [self._row_to_file_record(row) for row in visible_rows]

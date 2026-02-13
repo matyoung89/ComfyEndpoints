@@ -24,6 +24,7 @@ STATIC_ROOT_COMMANDS = {
     "logs",
     "destroy",
     "files",
+    "jobs",
     "endpoints",
     "invoke",
     "completion",
@@ -44,7 +45,33 @@ def _cmd_init(args: argparse.Namespace) -> int:
     app_spec_file = app_dir / "app.yaml"
 
     if not workflow_file.exists():
-        workflow_file.write_text("{}\n", encoding="utf-8")
+        workflow_file.write_text(
+            json.dumps(
+                {
+                    "prompt": {
+                        "1": {
+                            "class_type": "ApiInput",
+                            "inputs": {
+                                "name": "prompt",
+                                "type": "string",
+                                "required": True,
+                                "value": "",
+                            },
+                        },
+                        "2": {
+                            "class_type": "ApiOutput",
+                            "inputs": {
+                                "name": "image",
+                                "type": "image/png",
+                                "value": "",
+                            },
+                        },
+                    }
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     if not contract_file.exists():
         contract_payload = {
@@ -55,14 +82,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
                     "name": "prompt",
                     "type": "string",
                     "required": True,
-                    "node_id": "api_input_prompt",
+                    "node_id": "1",
                 }
             ],
             "outputs": [
                 {
                     "name": "image",
                     "type": "image/png",
-                    "node_id": "api_output_image",
+                    "node_id": "2",
                 }
             ],
         }
@@ -443,14 +470,40 @@ def _poll_job_until_terminal(
     timeout_seconds: int,
     poll_seconds: float,
 ) -> dict[str, Any]:
+    terminal_states = {
+        "completed",
+        "succeeded",
+        "failed",
+        "error",
+        "canceled",
+        "cancelled",
+        "timed_out",
+        "timeout",
+    }
     deadline = time.time() + timeout_seconds
+    last_response: dict[str, Any] | None = None
+    last_error: str | None = None
     while True:
-        response = _request_json(endpoint_url=endpoint_url, app_id=app_id, path=f"/jobs/{job_id}")
-        state = str(response.get("state", "")).lower()
-        if state in {"completed", "failed"}:
+        now = time.time()
+        if now > deadline:
+            state_hint = ""
+            if last_response is not None:
+                state_hint = f", last_state={last_response.get('state', '')}"
+            error_hint = f", last_error={last_error}" if last_error else ""
+            raise RuntimeError(f"Timed out waiting for job_id={job_id}{state_hint}{error_hint}")
+
+        try:
+            response = _request_json(endpoint_url=endpoint_url, app_id=app_id, path=f"/jobs/{job_id}")
+            last_response = response
+            last_error = None
+        except RuntimeError as exc:
+            last_error = str(exc)
+            time.sleep(max(0.2, poll_seconds))
+            continue
+
+        state = str(response.get("state", "")).strip().lower()
+        if state in terminal_states:
             return response
-        if time.time() > deadline:
-            raise RuntimeError(f"Timed out waiting for job_id={job_id}")
         time.sleep(max(0.2, poll_seconds))
 
 
@@ -614,6 +667,17 @@ def _cmd_files_upload(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_jobs_get(args: argparse.Namespace) -> int:
+    app_id, endpoint_url = _resolve_one_target(args.state_dir, args.app_id)
+    response = _request_json(
+        endpoint_url=endpoint_url,
+        app_id=app_id,
+        path=f"/jobs/{args.job_id}",
+    )
+    print(json.dumps(response, indent=2))
+    return 0
+
+
 def _cmd_endpoints_list(args: argparse.Namespace) -> int:
     records = _store(args.state_dir).list_records()
     payload_items: list[dict[str, Any]] = []
@@ -772,6 +836,12 @@ def _complete_candidates(state_dir: str | None, words: list[str], index: int) ->
         if len(words) >= 3 and words[2] == "upload":
             return ["--in", "--media-type", "--file-name", "--app-id"]
 
+    if root == "jobs":
+        if index == 2:
+            return ["get"]
+        if index == 3:
+            return sorted(app_ids)
+
     if root == "endpoints" and index == 2:
         return ["list", "describe"]
 
@@ -906,6 +976,14 @@ def build_parser() -> argparse.ArgumentParser:
     files_upload_cmd.add_argument("--file-name", default=None)
     files_upload_cmd.add_argument("--app-id", default=None, help="Required when multiple endpoints are deployed")
     files_upload_cmd.set_defaults(func=_cmd_files_upload)
+
+    jobs_cmd = subparsers.add_parser("jobs", help="Query jobs for a deployed endpoint")
+    jobs_subparsers = jobs_cmd.add_subparsers(dest="jobs_command", required=True)
+
+    jobs_get_cmd = jobs_subparsers.add_parser("get", help="Fetch status/details for one job_id")
+    jobs_get_cmd.add_argument("app_id")
+    jobs_get_cmd.add_argument("job_id")
+    jobs_get_cmd.set_defaults(func=_cmd_jobs_get)
 
     completion_cmd = subparsers.add_parser("completion", help="Generate shell completion script")
     completion_cmd.add_argument("shell", choices=["bash", "zsh"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 
 from comfy_endpoints.models import WorkflowApiContractV1
 
@@ -106,6 +107,7 @@ def map_contract_payload_to_prompt(
     workflow_payload: dict,
     contract: WorkflowApiContractV1,
     input_payload: dict[str, object],
+    job_id: str | None = None,
 ) -> dict:
     prompt_template = parse_prompt_template(workflow_payload)
     prompt = {node_id: copy.deepcopy(node) for node_id, node in prompt_template.items()}
@@ -126,6 +128,21 @@ def map_contract_payload_to_prompt(
             node_inputs[key] = input_payload[field.name]
         elif field.required:
             raise PromptMappingError(f"missing_required_input:{field.name}")
+
+    artifacts_dir = os.getenv("COMFY_ENDPOINTS_ARTIFACTS_DIR", "/opt/comfy_endpoints/runtime/artifacts")
+    state_db_path = os.getenv("COMFY_ENDPOINTS_STATE_DB", "/opt/comfy_endpoints/runtime/jobs.db")
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type", "")).strip().lower()
+        if class_type != "apioutput":
+            continue
+        node_inputs = node.get("inputs")
+        if not isinstance(node_inputs, dict):
+            continue
+        node_inputs["ce_job_id"] = job_id or ""
+        node_inputs["ce_artifacts_dir"] = artifacts_dir
+        node_inputs["ce_state_db"] = state_db_path
 
     return {"prompt": prompt}
 
