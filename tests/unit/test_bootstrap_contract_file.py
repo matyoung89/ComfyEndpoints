@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from comfy_endpoints.deploy.bootstrap import ensure_contract_file
+from comfy_endpoints.deploy.bootstrap import ensure_contract_file, ensure_workflow_file
 
 
 class BootstrapContractFileTest(unittest.TestCase):
@@ -46,6 +46,17 @@ class BootstrapContractFileTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"COMFY_ENDPOINTS_CONTRACT_JSON": ""}, clear=False):
                 with self.assertRaisesRegex(RuntimeError, "Contract path missing"):
                     ensure_contract_file(contract_path)
+
+    def test_writes_workflow_from_env_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workflow_path = Path(tmp_dir) / "runtime" / "workflow.json"
+            payload = {"prompt": {"1": {"inputs": {"value": ""}, "class_type": "ApiInput"}}}
+            with mock.patch.dict(os.environ, {"COMFY_ENDPOINTS_WORKFLOW_JSON": json.dumps(payload)}, clear=False):
+                ensure_workflow_file(workflow_path)
+
+            self.assertTrue(workflow_path.exists())
+            parsed = json.loads(workflow_path.read_text(encoding="utf-8"))
+            self.assertIn("prompt", parsed)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ regions:
   - US
 env:
   COMFY_HEADLESS: "1"
+  COMFY_ENDPOINTS_API_KEY: "demo-change-me"
 endpoint:
   name: run
   mode: async

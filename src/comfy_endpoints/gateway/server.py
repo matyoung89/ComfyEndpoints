@@ -11,6 +11,10 @@ from pathlib import Path
 from comfy_endpoints.contracts.validators import parse_workflow_contract
 from comfy_endpoints.gateway.comfy_client import ComfyClient, ComfyClientError
 from comfy_endpoints.gateway.job_store import JobStore
+from comfy_endpoints.gateway.prompt_mapper import (
+    PromptMappingError,
+    map_contract_payload_to_prompt,
+)
 
 
 @dataclass(slots=True)
@@ -20,6 +24,7 @@ class GatewayConfig:
     api_key: str
     comfy_url: str
     contract_path: Path
+    workflow_path: Path
     state_db: Path
 
 
@@ -44,6 +49,7 @@ class GatewayApp:
     def __init__(self, config: GatewayConfig):
         self.config = config
         self.contract = parse_workflow_contract(config.contract_path)
+        self.workflow = json.loads(config.workflow_path.read_text(encoding="utf-8"))
         self.job_store = JobStore(config.state_db)
         self.comfy_client = ComfyClient(config.comfy_url)
 
@@ -142,7 +148,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _execute_job(self, job_id: str, payload: dict) -> None:
         try:
             self.app.job_store.mark_running(job_id)
-            prompt_id = self.app.comfy_client.queue_prompt({"prompt": payload})
+            mapped_prompt = map_contract_payload_to_prompt(
+                workflow_payload=self.app.workflow,
+                contract=self.app.contract,
+                input_payload=payload,
+            )
+            prompt_id = self.app.comfy_client.queue_prompt(mapped_prompt)
             self.app.job_store.mark_completed(
                 job_id,
                 {
@@ -150,6 +161,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "status": "submitted",
                 },
             )
+        except PromptMappingError as exc:
+            self.app.job_store.mark_failed(job_id, f"VALIDATION_ERROR:{exc}")
         except ComfyClientError as exc:
             self.app.job_store.mark_failed(job_id, f"QUEUE_ERROR:{exc}")
         except Exception as exc:  # noqa: BLE001
@@ -175,6 +188,7 @@ def main() -> int:
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
     parser.add_argument("--contract-path", required=True)
+    parser.add_argument("--workflow-path", required=True)
     parser.add_argument("--state-db", default="/var/lib/comfy_endpoints/jobs.db")
     args = parser.parse_args()
 
@@ -185,6 +199,7 @@ def main() -> int:
             api_key=args.api_key,
             comfy_url=args.comfy_url,
             contract_path=Path(args.contract_path),
+            workflow_path=Path(args.workflow_path),
             state_db=Path(args.state_db),
         )
     )

@@ -138,7 +138,7 @@ class DeploymentServiceTest(unittest.TestCase):
                         )
                     )
                 )
-                service._is_endpoint_ready = mock.Mock(return_value=True)
+                service._probe_endpoint = mock.Mock(return_value=(True, "HTTP 200"))
                 record = service.deploy(app_path)
 
             self.assertEqual(record.state, DeploymentState.READY)
@@ -149,6 +149,11 @@ class DeploymentServiceTest(unittest.TestCase):
                 fake_provider.last_env.get("COMFY_ENDPOINTS_CONTRACT_PATH"),
                 "/opt/comfy_endpoints/runtime/workflow.contract.json",
             )
+            self.assertEqual(
+                fake_provider.last_env.get("COMFY_ENDPOINTS_WORKFLOW_PATH"),
+                "/opt/comfy_endpoints/runtime/workflow.json",
+            )
+            self.assertIn("COMFY_ENDPOINTS_WORKFLOW_JSON", fake_provider.last_env)
             self.assertIn("pod_logs_tail", record.metadata)
 
     def test_retries_on_outbid_until_ready(self) -> None:
@@ -219,12 +224,91 @@ class DeploymentServiceTest(unittest.TestCase):
                             )
                         )
                     )
-                    service._is_endpoint_ready = mock.Mock(return_value=True)
+                    service._probe_endpoint = mock.Mock(return_value=(True, "HTTP 200"))
                     record = service.deploy(app_path)
 
             self.assertEqual(record.state, DeploymentState.READY)
             self.assertEqual(provider.create_calls, 2)
             self.assertEqual(provider.destroy_calls, 1)
+
+    def test_deploy_logs_health_probe_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app_path = root / "app.json"
+            workflow_path = root / "workflow.json"
+            contract_path = root / "workflow.contract.json"
+
+            workflow_path.write_text("{}", encoding="utf-8")
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "demo-contract",
+                        "version": "v1",
+                        "inputs": [{"name": "prompt", "type": "string", "required": True, "node_id": "1"}],
+                        "outputs": [{"name": "image", "type": "image/png", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "demo",
+                        "version": "v1",
+                        "workflow_path": "./workflow.json",
+                        "provider": "runpod",
+                        "gpu_profile": "A10G",
+                        "regions": ["US"],
+                        "env": {},
+                        "endpoint": {
+                            "name": "run",
+                            "mode": "async",
+                            "auth_mode": "api_key",
+                            "timeout_seconds": 300,
+                            "max_payload_mb": 10,
+                        },
+                        "cache_policy": {
+                            "watch_paths": ["/tmp/models"],
+                            "min_file_size_mb": 100,
+                            "symlink_targets": ["/tmp/models"],
+                        },
+                        "build": {"comfy_version": "0.3.26", "plugins": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = DeploymentService(state_dir=root / "state")
+            fake_provider = FakeProvider()
+            callbacks: list[str] = []
+            with mock.patch("comfy_endpoints.runtime.deployment_service.build_provider", return_value=fake_provider):
+                with mock.patch("comfy_endpoints.runtime.deployment_service.time.sleep", return_value=None):
+                    service.image_manager = mock.Mock(
+                        ensure_image=mock.Mock(
+                            return_value=ImageResolution(
+                                image_ref="ghcr.io/comfy-endpoints/golden:test",
+                                image_exists=True,
+                                built=False,
+                            )
+                        )
+                    )
+                    probe_results = iter([(False, "HTTP 503"), (True, "HTTP 200")])
+
+                    def _probe(_endpoint_url: str) -> tuple[bool, str]:
+                        try:
+                            return next(probe_results)
+                        except StopIteration:
+                            return True, "HTTP 200"
+
+                    service._probe_endpoint = mock.Mock(side_effect=_probe)
+                    _record = service.deploy(app_path, progress_callback=callbacks.append)
+
+            self.assertTrue(
+                any("health probe pending (attempt 1): HTTP 503" in line for line in callbacks)
+            )
+            self.assertTrue(
+                any("endpoint health probe passed (attempt 2)" in line for line in callbacks)
+            )
 
 
 if __name__ == "__main__":

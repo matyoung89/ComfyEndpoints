@@ -27,11 +27,29 @@ class DeploymentService:
 
     @staticmethod
     def _is_endpoint_ready(endpoint_url: str) -> bool:
+        ready, _detail = DeploymentService._probe_endpoint(endpoint_url)
+        return ready
+
+    @staticmethod
+    def _probe_endpoint(endpoint_url: str) -> tuple[bool, str]:
         try:
-            with urllib.request.urlopen(f"{endpoint_url}/healthz", timeout=10) as response:
-                return response.status == 200
-        except (urllib.error.URLError, urllib.error.HTTPError):
-            return False
+            request = urllib.request.Request(
+                f"{endpoint_url}/healthz",
+                headers={
+                    "accept": "application/json",
+                    "user-agent": "comfy-endpoints/0.1 deploy-health-probe",
+                },
+                method="GET",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if response.status == 200:
+                    return True, "HTTP 200"
+                return False, f"HTTP {response.status}"
+        except urllib.error.HTTPError as exc:
+            return False, f"HTTP {exc.code}"
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason) if exc.reason else "connection error"
+            return False, f"URL error: {reason}"
 
     @staticmethod
     def _new_log_lines(previous: str, current: str, max_lines: int = 25) -> list[str]:
@@ -85,10 +103,13 @@ class DeploymentService:
             )
         max_attempts = int(os.getenv("COMFY_ENDPOINTS_RUNPOD_MAX_DEPLOY_ATTEMPTS", "4"))
         env = dict(app_spec.env)
+        workflow_json = app_spec.workflow_path.read_text(encoding="utf-8")
         env["COMFY_ENDPOINTS_APP_ID"] = app_spec.app_id
         env["COMFY_ENDPOINTS_CONTRACT_ID"] = contract.contract_id
         env["COMFY_ENDPOINTS_CONTRACT_PATH"] = "/opt/comfy_endpoints/runtime/workflow.contract.json"
         env["COMFY_ENDPOINTS_CONTRACT_JSON"] = json.dumps(asdict(contract))
+        env["COMFY_ENDPOINTS_WORKFLOW_PATH"] = "/opt/comfy_endpoints/runtime/workflow.json"
+        env["COMFY_ENDPOINTS_WORKFLOW_JSON"] = workflow_json
         mounts = [{"source": "cache", "target": "/cache"}]
 
         deployment_id = ""
@@ -125,6 +146,9 @@ class DeploymentService:
                 deadline = time.time() + 900
                 last_detail = ""
                 next_log_poll = 0.0
+                health_probe_attempt = 0
+                next_health_probe_log_time = 0.0
+                last_health_probe_detail = ""
                 while True:
                     if progress_callback and status.detail != last_detail:
                         progress_callback(f"[deploy] pod status: {status.detail}")
@@ -144,20 +168,41 @@ class DeploymentService:
                     if status.state in {DeploymentState.DEGRADED, DeploymentState.TERMINATED}:
                         break
 
-                    if status.state == DeploymentState.READY and self._is_endpoint_ready(endpoint_url):
-                        break
+                    if status.state == DeploymentState.READY:
+                        health_probe_attempt += 1
+                        endpoint_ready, probe_detail = self._probe_endpoint(endpoint_url)
+                        if endpoint_ready:
+                            if progress_callback:
+                                progress_callback(
+                                    f"[deploy] endpoint health probe passed (attempt {health_probe_attempt})"
+                                )
+                            break
+
+                        now = time.time()
+                        if progress_callback and (
+                            now >= next_health_probe_log_time
+                            or probe_detail != last_health_probe_detail
+                        ):
+                            progress_callback(
+                                f"[deploy] health probe pending (attempt {health_probe_attempt}): {probe_detail}"
+                            )
+                            next_health_probe_log_time = now + 15.0
+                            last_health_probe_detail = probe_detail
 
                     if time.time() > deadline:
                         break
                     time.sleep(5)
                     status = provider.get_status(deployment_id)
 
-                if status.state == DeploymentState.READY and self._is_endpoint_ready(endpoint_url):
+                endpoint_ready, endpoint_probe_detail = self._probe_endpoint(endpoint_url)
+                if status.state == DeploymentState.READY and endpoint_ready:
                     if progress_callback:
                         progress_callback("[deploy] endpoint health check passed")
                     break
 
                 detail = status.detail if status else "unknown"
+                if status.state == DeploymentState.READY:
+                    detail = f"{detail} ({endpoint_probe_detail})"
                 last_error = detail
                 outbid = "outbid" in detail.lower()
                 retryable_state = status.state in {
@@ -186,9 +231,10 @@ class DeploymentService:
         if status is None:
             raise RuntimeError(f"Deployment did not start. Last error: {last_error}")
 
-        if status.state == DeploymentState.READY and not self._is_endpoint_ready(endpoint_url):
+        final_ready, final_probe_detail = self._probe_endpoint(endpoint_url)
+        if status.state == DeploymentState.READY and not final_ready:
             status.state = DeploymentState.BOOTSTRAPPING
-            status.detail = f"{status.detail} (endpoint not ready)"
+            status.detail = f"{status.detail} ({final_probe_detail})"
 
         record = DeploymentRecord(
             app_id=app_spec.app_id,

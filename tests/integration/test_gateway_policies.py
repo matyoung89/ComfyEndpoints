@@ -26,6 +26,7 @@ class GatewayPoliciesIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             contract_path = root / "workflow.contract.json"
+            workflow_path = root / "workflow.json"
             contract_path.write_text(
                 json.dumps(
                     {
@@ -44,6 +45,19 @@ class GatewayPoliciesIntegrationTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            workflow_path.write_text(
+                json.dumps(
+                    {
+                        "prompt": {
+                            "1": {
+                                "inputs": {"value": ""},
+                                "class_type": "ApiInput",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             app = GatewayApp(
                 GatewayConfig(
@@ -52,6 +66,7 @@ class GatewayPoliciesIntegrationTest(unittest.TestCase):
                     api_key="secret",
                     comfy_url="http://127.0.0.1:8188",
                     contract_path=contract_path,
+                    workflow_path=workflow_path,
                     state_db=root / "jobs.db",
                 )
             )
