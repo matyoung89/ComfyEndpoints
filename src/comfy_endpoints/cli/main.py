@@ -139,7 +139,10 @@ def _request_json(
     url = f"{endpoint_url.rstrip('/')}{path}"
     if query:
         url = f"{url}?{urllib.parse.urlencode(query)}"
-    headers = {"accept": "application/json"}
+    headers = {
+        "accept": "application/json",
+        "user-agent": "comfy-endpoints/0.1 cli",
+    }
     api_key = _app_api_key(app_id)
     if api_key:
         headers["x-api-key"] = api_key
@@ -165,6 +168,7 @@ def _request_json_post(
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
+        "user-agent": "comfy-endpoints/0.1 cli",
     }
     api_key = _app_api_key(app_id)
     if api_key:
@@ -190,7 +194,10 @@ def _request_download(
     out_path: Path,
 ) -> dict[str, str]:
     url = f"{endpoint_url.rstrip('/')}{path}"
-    headers = {"accept": "*/*"}
+    headers = {
+        "accept": "*/*",
+        "user-agent": "comfy-endpoints/0.1 cli",
+    }
     api_key = _app_api_key(app_id)
     if api_key:
         headers["x-api-key"] = api_key
@@ -231,6 +238,7 @@ def _request_upload(
         "content-type": media_type or "application/octet-stream",
         "x-file-name": file_name or in_path.name,
         "x-app-id": app_id,
+        "user-agent": "comfy-endpoints/0.1 cli",
     }
     api_key = _app_api_key(app_id)
     if api_key:
