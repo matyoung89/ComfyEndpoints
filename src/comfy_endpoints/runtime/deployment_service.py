@@ -17,6 +17,12 @@ from comfy_endpoints.runtime.state_store import DeploymentStore
 
 
 class DeploymentService:
+    _HF_ENV_KEYS = (
+        "HUGGINGFACE_TOKEN",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+    )
+
     def __init__(self, state_dir: Path):
         self.state_store = DeploymentStore(state_dir=state_dir)
         self.image_manager = ImageManager()
@@ -117,6 +123,10 @@ class DeploymentService:
             )
         max_attempts = int(os.getenv("COMFY_ENDPOINTS_RUNPOD_MAX_DEPLOY_ATTEMPTS", "4"))
         env = dict(app_spec.env)
+        for key in self._HF_ENV_KEYS:
+            value = os.getenv(key, "").strip()
+            if value and key not in env:
+                env[key] = value
         workflow_json = app_spec.workflow_path.read_text(encoding="utf-8")
         env["COMFY_ENDPOINTS_APP_ID"] = app_spec.app_id
         env["COMFY_ENDPOINTS_CONTRACT_ID"] = contract.contract_id
