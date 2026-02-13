@@ -7,7 +7,18 @@ import urllib.request
 
 
 class ComfyClientError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_text: str | None = None,
+        response_json: dict | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+        self.response_json = response_json
 
 
 class ComfyClient:
@@ -23,11 +34,25 @@ class ComfyClient:
             method=method,
         )
 
+        response_text: str | None = None
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            raise ComfyClientError(f"Comfy {method} {path} HTTP error: {exc.code}") from exc
+            response_text = exc.read().decode("utf-8", errors="replace")
+            response_json = None
+            try:
+                parsed = json.loads(response_text or "{}")
+                if isinstance(parsed, dict):
+                    response_json = parsed
+            except json.JSONDecodeError:
+                response_json = None
+            raise ComfyClientError(
+                f"Comfy {method} {path} HTTP error: {exc.code}",
+                status_code=exc.code,
+                response_text=response_text,
+                response_json=response_json,
+            ) from exc
         except urllib.error.URLError as exc:
             raise ComfyClientError(f"Comfy {method} {path} connection error: {exc.reason}") from exc
 
@@ -74,3 +99,27 @@ class ComfyClient:
             raise ComfyClientError(f"Comfy view HTTP error: {exc.code}") from exc
         except urllib.error.URLError as exc:
             raise ComfyClientError(f"Comfy view connection error: {exc.reason}") from exc
+
+    def get_external_models(self) -> object:
+        request = urllib.request.Request(
+            f"{self.base_url}/externalmodel/getlist",
+            headers={"accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            response_text = exc.read().decode("utf-8", errors="replace")
+            raise ComfyClientError(
+                f"Comfy manager external model list HTTP error: {exc.code}",
+                status_code=exc.code,
+                response_text=response_text,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ComfyClientError(f"Comfy manager external model list connection error: {exc.reason}") from exc
+
+        try:
+            return json.loads(body or "[]")
+        except json.JSONDecodeError as exc:
+            raise ComfyClientError("Comfy manager external model list returned invalid JSON") from exc

@@ -3,13 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from comfy_endpoints.contracts.validators import parse_workflow_contract
@@ -74,6 +77,171 @@ def wait_for_comfy_ready(comfy_url: str, timeout_seconds: int = 180) -> None:
     raise RuntimeError(f"Comfy startup timeout waiting for readiness: {last_error}")
 
 
+MISSING_MODEL_PATTERN = re.compile(
+    r"Value not in list:\s*(?P<input_name>[A-Za-z0-9_]+)\s*:\s*'(?P<filename>[^']+)'",
+)
+
+MODEL_DIR_BY_INPUT_NAME = {
+    "ckpt_name": "checkpoints",
+    "unet_name": "diffusion_models",
+    "clip_name": "text_encoders",
+    "clip_name1": "text_encoders",
+    "clip_name2": "text_encoders",
+    "vae_name": "vae",
+    "lora_name": "loras",
+    "control_net_name": "controlnet",
+}
+
+MODEL_DIR_BY_TYPE = {
+    "checkpoint": "checkpoints",
+    "checkpoints": "checkpoints",
+    "diffusion_model": "diffusion_models",
+    "diffusion_models": "diffusion_models",
+    "unet": "diffusion_models",
+    "text_encoder": "text_encoders",
+    "text_encoders": "text_encoders",
+    "clip": "text_encoders",
+    "vae": "vae",
+    "lora": "loras",
+    "loras": "loras",
+    "controlnet": "controlnet",
+    "control_net": "controlnet",
+}
+
+
+@dataclass(slots=True)
+class MissingModelRequirement:
+    input_name: str
+    filename: str
+
+
+def _missing_models_from_preflight_error(exc: ComfyClientError) -> list[MissingModelRequirement]:
+    text_candidates: list[str] = []
+    if exc.response_text:
+        text_candidates.append(exc.response_text)
+    if isinstance(exc.response_json, dict):
+        for key in ("details", "message"):
+            value = exc.response_json.get(key)
+            if isinstance(value, str):
+                text_candidates.append(value)
+
+    parsed: list[MissingModelRequirement] = []
+    seen: set[tuple[str, str]] = set()
+    for blob in text_candidates:
+        for match in MISSING_MODEL_PATTERN.finditer(blob):
+            input_name = match.group("input_name").strip()
+            filename = match.group("filename").strip()
+            if not input_name or not filename:
+                continue
+            key = (input_name, filename)
+            if key in seen:
+                continue
+            seen.add(key)
+            parsed.append(MissingModelRequirement(input_name=input_name, filename=filename))
+    return parsed
+
+
+def _iter_model_entries(payload: object) -> list[dict]:
+    entries: list[dict] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            values_lower = {str(k).lower(): v for k, v in node.items()}
+            filename_raw = values_lower.get("filename") or values_lower.get("name")
+            url_raw = values_lower.get("url") or values_lower.get("download_url")
+            if isinstance(filename_raw, str) and isinstance(url_raw, str):
+                item = {
+                    "filename": filename_raw.strip(),
+                    "url": url_raw.strip(),
+                    "type": str(values_lower.get("type", "")).strip().lower(),
+                }
+                if item["filename"] and item["url"]:
+                    entries.append(item)
+            for value in node.values():
+                walk(value)
+            return
+
+        if isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(payload)
+    unique: dict[tuple[str, str], dict] = {}
+    for item in entries:
+        unique[(item["filename"], item["url"])] = item
+    return list(unique.values())
+
+
+def _target_model_dir(requirement: MissingModelRequirement, external_type: str) -> str:
+    if requirement.input_name in MODEL_DIR_BY_INPUT_NAME:
+        return MODEL_DIR_BY_INPUT_NAME[requirement.input_name]
+    if external_type in MODEL_DIR_BY_TYPE:
+        return MODEL_DIR_BY_TYPE[external_type]
+    return "checkpoints"
+
+
+def _download_file(url: str, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_path.with_suffix(target_path.suffix + ".part")
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=600) as response:
+        with tmp_path.open("wb") as out:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+    tmp_path.replace(target_path)
+
+
+def _install_missing_models(
+    comfy_client: ComfyClient,
+    requirements: list[MissingModelRequirement],
+    comfy_root: Path,
+) -> int:
+    if not requirements:
+        return 0
+
+    try:
+        external_payload = comfy_client.get_external_models()
+    except ComfyClientError:
+        return 0
+
+    entries = _iter_model_entries(external_payload)
+    if not entries:
+        return 0
+
+    installed_count = 0
+    for requirement in requirements:
+        selected = None
+        for item in entries:
+            if item["filename"] == requirement.filename:
+                selected = item
+                break
+        if not selected:
+            continue
+
+        model_dir = _target_model_dir(requirement, selected.get("type", ""))
+        target_path = comfy_root / "models" / model_dir / requirement.filename
+        if target_path.exists():
+            continue
+
+        try:
+            _download_file(selected["url"], target_path)
+            installed_count += 1
+            print(
+                f"[bootstrap] installed model filename={requirement.filename} into {model_dir}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[bootstrap] failed to install model filename={requirement.filename}: {exc}",
+                file=sys.stderr,
+            )
+
+    return installed_count
+
+
 def run_bootstrap(
     cache_root: Path,
     watch_paths: list[Path],
@@ -99,7 +267,7 @@ def run_bootstrap(
 
     comfy_command = os.getenv(
         "COMFY_START_COMMAND",
-        "python /opt/comfy/main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch",
+        "python /opt/comfy/main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --enable-manager --disable-manager-ui",
     )
 
     gateway_command = (
@@ -127,11 +295,34 @@ def run_bootstrap(
     try:
         wait_for_comfy_ready("http://127.0.0.1:8188")
         preflight_payload = build_preflight_payload(workflow_payload, contract)
-        preflight_prompt_id = ComfyClient("http://127.0.0.1:8188").queue_prompt(preflight_payload)
-        print(
-            f"[bootstrap] comfy preflight queue passed prompt_id={preflight_prompt_id}",
-            file=sys.stderr,
-        )
+        comfy_client = ComfyClient("http://127.0.0.1:8188")
+        max_preflight_attempts = int(os.getenv("COMFY_ENDPOINTS_PREFLIGHT_MAX_ATTEMPTS", "8"))
+        for attempt in range(1, max_preflight_attempts + 1):
+            try:
+                preflight_prompt_id = comfy_client.queue_prompt(preflight_payload)
+                print(
+                    f"[bootstrap] comfy preflight queue passed prompt_id={preflight_prompt_id}",
+                    file=sys.stderr,
+                )
+                break
+            except ComfyClientError as exc:
+                missing_models = _missing_models_from_preflight_error(exc)
+                if not missing_models or attempt == max_preflight_attempts:
+                    raise
+
+                installed = _install_missing_models(
+                    comfy_client=comfy_client,
+                    requirements=missing_models,
+                    comfy_root=Path("/opt/comfy"),
+                )
+                if installed <= 0:
+                    raise
+
+                print(
+                    f"[bootstrap] preflight retry attempt={attempt + 1} after installing {installed} model(s)",
+                    file=sys.stderr,
+                )
+                time.sleep(2)
     except ComfyClientError as exc:
         if comfy_process.poll() is None:
             comfy_process.terminate()

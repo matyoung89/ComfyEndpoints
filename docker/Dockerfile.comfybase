@@ -14,3 +14,4 @@ RUN git clone "${COMFYUI_REPO}" /opt/comfy \
  && git checkout "${COMFYUI_REF}"
 
 RUN pip install --no-cache-dir -r /opt/comfy/requirements.txt
+RUN if [ -f /opt/comfy/manager_requirements.txt ]; then pip install --no-cache-dir -r /opt/comfy/manager_requirements.txt; fi
