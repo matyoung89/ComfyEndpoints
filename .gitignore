@@ -3,3 +3,5 @@
 __pycache__/
 *.pyc
 .comfy_endpoints/
+.DS_Store
+**/.DS_Store
