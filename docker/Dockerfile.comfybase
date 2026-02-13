@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+
+ARG COMFYUI_REPO=https://github.com/comfyanonymous/ComfyUI.git
+ARG COMFYUI_REF=master
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN git clone "${COMFYUI_REPO}" /opt/comfy \
+ && cd /opt/comfy \
+ && git checkout "${COMFYUI_REF}"
+
+RUN pip install --no-cache-dir -r /opt/comfy/requirements.txt

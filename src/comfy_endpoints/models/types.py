@@ -55,9 +55,12 @@ class BuildSpec:
     plugins: list[BuildPluginSpec]
     image_ref: str | None = None
     image_repository: str | None = None
+    base_image_repository: str | None = None
     container_registry_auth_id: str | None = None
     dockerfile_path: str | None = None
+    base_dockerfile_path: str | None = None
     build_context: str | None = None
+    base_build_context: str | None = None
 
 
 @dataclass(slots=True)

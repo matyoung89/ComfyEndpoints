@@ -36,12 +36,14 @@ If your image is private, set these in app spec `build`:
 - `container_registry_auth_id`: RunPod registry auth ID for private registry pulls
 
 Golden image handling during `deploy`:
-1. Compute deterministic image tag from Comfy version + plugin refs + Dockerfile hash.
-2. Check registry (`docker manifest inspect`) for that tag.
-3. If missing:
+1. Compute deterministic `comfybase` image tag from Comfy version + ComfyUI ref + base Dockerfile hash.
+2. Ensure `comfybase` exists (build only when missing).
+3. Compute deterministic `golden` image tag from app/runtime source + golden Dockerfile hash + resolved `comfybase` tag.
+4. Check registry (`docker manifest inspect`) for golden tag.
+5. If missing:
    - use local Docker Buildx when available, or
    - dispatch GitHub Actions workflow (`.github/workflows/build_golden_image.yml`) when Docker is unavailable or backend is set to `github_actions`.
-4. Deploy using the resolved image ref.
+6. Deploy using the resolved golden image ref.
 
 Note: auto build/push requires local Docker with Buildx available.
 
@@ -57,6 +59,11 @@ Note: auto build/push requires local Docker with Buildx available.
 - `GITHUB_REPOSITORY`: `owner/repo` required for remote GitHub Actions build dispatch.
 - `COMFY_ENDPOINTS_GHA_WORKFLOW`: workflow filename (default `build_golden_image.yml`).
 - `COMFY_ENDPOINTS_GHA_REF`: git ref for workflow dispatch (default `main`).
+
+Build spec fields now support split base/golden images:
+- `build.base_image_repository`
+- `build.base_dockerfile_path`
+- `build.base_build_context`
 
 ## RunPod API Key Storage (Safe)
 

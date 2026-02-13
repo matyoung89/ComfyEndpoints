@@ -73,8 +73,11 @@ cache_policy:
 build:
   comfy_version: 0.3.26
   image_repository: ghcr.io/matyoung89/comfy-endpoints-golden
+  base_image_repository: ghcr.io/matyoung89/comfy-endpoints-comfybase
+  base_dockerfile_path: docker/Dockerfile.comfybase
   dockerfile_path: docker/Dockerfile.golden
   build_context: .
+  base_build_context: .
   container_registry_auth_id: ""
   plugins:
     - repo: https://github.com/comfyanonymous/ComfyUI

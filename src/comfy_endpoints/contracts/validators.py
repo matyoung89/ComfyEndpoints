@@ -92,13 +92,28 @@ def parse_app_spec(path: Path) -> AppSpecV1:
                 if build_raw.get("image_repository")
                 else None
             ),
+            base_image_repository=(
+                str(build_raw["base_image_repository"])
+                if build_raw.get("base_image_repository")
+                else None
+            ),
             container_registry_auth_id=(
                 str(build_raw["container_registry_auth_id"])
                 if build_raw.get("container_registry_auth_id")
                 else None
             ),
             dockerfile_path=str(build_raw["dockerfile_path"]) if build_raw.get("dockerfile_path") else None,
+            base_dockerfile_path=(
+                str(build_raw["base_dockerfile_path"])
+                if build_raw.get("base_dockerfile_path")
+                else None
+            ),
             build_context=str(build_raw["build_context"]) if build_raw.get("build_context") else None,
+            base_build_context=(
+                str(build_raw["base_build_context"])
+                if build_raw.get("base_build_context")
+                else None
+            ),
         ),
     )
 

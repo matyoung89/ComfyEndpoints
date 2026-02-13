@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Callable
 
 from comfy_endpoints.models import AppSpecV1
-from comfy_endpoints.runtime.image_resolver import resolve_golden_image
+from comfy_endpoints.runtime.image_resolver import (
+    resolve_comfybase_image,
+    resolve_comfyui_source,
+    resolve_golden_image,
+)
 
 
 class ImageBuildError(RuntimeError):
@@ -39,26 +43,62 @@ class ImageManager:
         app_spec: AppSpecV1,
         progress_callback: Callable[[str], None] | None = None,
     ) -> ImageResolution:
-        image_ref = resolve_golden_image(app_spec)
+        comfybase_image_ref = resolve_comfybase_image(app_spec)
+        image_ref = resolve_golden_image(app_spec, comfybase_image_ref=comfybase_image_ref)
         if progress_callback:
+            progress_callback(f"[image] resolved comfybase_image_ref={comfybase_image_ref}")
             progress_callback(f"[image] resolved image_ref={image_ref}")
+
+        if not self._image_exists(comfybase_image_ref):
+            if progress_callback:
+                progress_callback("[image:base] image missing; starting build/push")
+            comfyui_repo, comfyui_ref = resolve_comfyui_source(app_spec)
+            self._build_and_push(
+                image_ref=comfybase_image_ref,
+                dockerfile_path=app_spec.build.base_dockerfile_path or "docker/Dockerfile.comfybase",
+                build_context=app_spec.build.base_build_context or app_spec.build.build_context or ".",
+                build_args={
+                    "COMFYUI_REPO": comfyui_repo,
+                    "COMFYUI_REF": comfyui_ref,
+                },
+                progress_callback=progress_callback,
+                label="base",
+            )
+            self._wait_for_image(
+                comfybase_image_ref,
+                progress_callback=progress_callback,
+                label="base",
+            )
+        elif progress_callback:
+            progress_callback("[image:base] image already available in registry")
+
         if self._image_exists(image_ref):
             if progress_callback:
-                progress_callback("[image] image already available in registry")
+                progress_callback("[image:golden] image already available in registry")
             return ImageResolution(image_ref=image_ref, image_exists=True, built=False)
 
         if progress_callback:
-            progress_callback("[image] image missing; starting build/push")
-        self._build_and_push(app_spec, image_ref, progress_callback=progress_callback)
-        self._wait_for_image(image_ref, progress_callback=progress_callback)
+            progress_callback("[image:golden] image missing; starting build/push")
+        self._build_and_push(
+            image_ref=image_ref,
+            dockerfile_path=app_spec.build.dockerfile_path or "docker/Dockerfile.golden",
+            build_context=app_spec.build.build_context or ".",
+            build_args={"BASE_IMAGE": comfybase_image_ref},
+            progress_callback=progress_callback,
+            label="golden",
+        )
+        self._wait_for_image(image_ref, progress_callback=progress_callback, label="golden")
 
         return ImageResolution(image_ref=image_ref, image_exists=True, built=True)
 
     def _build_and_push(
         self,
-        app_spec: AppSpecV1,
         image_ref: str,
+        dockerfile_path: str,
+        build_context: str,
+        build_args: dict[str, str] | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        label: str = "image",
     ) -> None:
         backend = os.getenv("COMFY_ENDPOINTS_IMAGE_BUILD_BACKEND", "auto").strip().lower()
         if backend not in {"auto", "local", "github_actions"}:
@@ -68,30 +108,59 @@ class ImageManager:
 
         if backend == "local":
             if progress_callback:
-                progress_callback("[image] backend=local")
-            self._build_and_push_local(app_spec, image_ref, progress_callback=progress_callback)
+                progress_callback(f"[image:{label}] backend=local")
+            self._build_and_push_local(
+                image_ref=image_ref,
+                dockerfile_path=dockerfile_path,
+                build_context=build_context,
+                build_args=build_args,
+                progress_callback=progress_callback,
+                label=label,
+            )
             return
 
         if backend == "github_actions":
             if progress_callback:
-                progress_callback("[image] backend=github_actions")
-            self._dispatch_github_actions_build(app_spec, image_ref, progress_callback=progress_callback)
+                progress_callback(f"[image:{label}] backend=github_actions")
+            self._dispatch_github_actions_build(
+                image_ref=image_ref,
+                dockerfile_path=dockerfile_path,
+                build_context=build_context,
+                build_args=build_args,
+                progress_callback=progress_callback,
+                label=label,
+            )
             return
 
         if self._docker_available():
             if progress_callback:
-                progress_callback("[image] backend=auto selected local docker")
-            self._build_and_push_local(app_spec, image_ref, progress_callback=progress_callback)
+                progress_callback(f"[image:{label}] backend=auto selected local docker")
+            self._build_and_push_local(
+                image_ref=image_ref,
+                dockerfile_path=dockerfile_path,
+                build_context=build_context,
+                build_args=build_args,
+                progress_callback=progress_callback,
+                label=label,
+            )
             return
 
         if progress_callback:
-            progress_callback("[image] backend=auto selected github_actions")
-        self._dispatch_github_actions_build(app_spec, image_ref, progress_callback=progress_callback)
+            progress_callback(f"[image:{label}] backend=auto selected github_actions")
+        self._dispatch_github_actions_build(
+            image_ref=image_ref,
+            dockerfile_path=dockerfile_path,
+            build_context=build_context,
+            build_args=build_args,
+            progress_callback=progress_callback,
+            label=label,
+        )
 
     def _wait_for_image(
         self,
         image_ref: str,
         progress_callback: Callable[[str], None] | None = None,
+        label: str = "image",
     ) -> None:
         timeout_seconds = int(os.getenv("COMFY_ENDPOINTS_IMAGE_BUILD_TIMEOUT_SECONDS", "1800"))
         poll_seconds = int(os.getenv("COMFY_ENDPOINTS_IMAGE_BUILD_POLL_SECONDS", "15"))
@@ -102,12 +171,12 @@ class ImageManager:
             poll_count += 1
             if self._image_exists(image_ref):
                 if progress_callback:
-                    progress_callback(f"[image] image available after {poll_count} poll(s)")
+                    progress_callback(f"[image:{label}] image available after {poll_count} poll(s)")
                 return
             if progress_callback:
                 remaining = int(deadline - time.time())
                 progress_callback(
-                    f"[image] waiting for registry availability (poll={poll_count}, remaining={remaining}s)"
+                    f"[image:{label}] waiting for registry availability (poll={poll_count}, remaining={remaining}s)"
                 )
             time.sleep(poll_seconds)
 
@@ -217,14 +286,14 @@ class ImageManager:
 
     def _build_and_push_local(
         self,
-        app_spec: AppSpecV1,
         image_ref: str,
+        dockerfile_path: str,
+        build_context: str,
+        build_args: dict[str, str] | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        label: str = "image",
     ) -> None:
         self._ensure_registry_login(image_ref, progress_callback=progress_callback)
-
-        dockerfile_path = app_spec.build.dockerfile_path or "docker/Dockerfile.golden"
-        build_context = app_spec.build.build_context or "."
 
         command = [
             "docker",
@@ -237,29 +306,34 @@ class ImageManager:
             "-t",
             image_ref,
             "--push",
-            build_context,
         ]
+        for key, value in (build_args or {}).items():
+            command.extend(["--build-arg", f"{key}={value}"])
+        command.append(build_context)
         if progress_callback:
             progress_callback(
-                "[image] running local buildx push: "
+                f"[image:{label}] running local buildx push: "
                 + " ".join(shlex.quote(part) for part in command)
             )
 
         result = subprocess.run(command, cwd=self.project_root, capture_output=True, text=True)
         if result.returncode != 0:
             raise ImageBuildError(
-                "Failed building/pushing golden image. "
+                "Failed building/pushing image. "
                 f"Command: {' '.join(shlex.quote(part) for part in command)}\n"
                 f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             )
         if progress_callback:
-            progress_callback("[image] local buildx push completed")
+            progress_callback(f"[image:{label}] local buildx push completed")
 
     def _dispatch_github_actions_build(
         self,
-        app_spec: AppSpecV1,
         image_ref: str,
+        dockerfile_path: str,
+        build_context: str,
+        build_args: dict[str, str] | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        label: str = "image",
     ) -> None:
         token = os.getenv("GITHUB_TOKEN", "").strip()
         repository = os.getenv("GITHUB_REPOSITORY", "").strip()
@@ -275,13 +349,14 @@ class ImageManager:
             "ref": ref,
             "inputs": {
                 "image_ref": image_ref,
-                "dockerfile_path": app_spec.build.dockerfile_path or "docker/Dockerfile.golden",
-                "build_context": app_spec.build.build_context or ".",
+                "dockerfile_path": dockerfile_path,
+                "build_context": build_context,
+                "build_args": "\n".join(f"{key}={value}" for key, value in (build_args or {}).items()),
             },
         }
         if progress_callback:
             progress_callback(
-                f"[image] dispatching github workflow {workflow} on {repository}@{ref}"
+                f"[image:{label}] dispatching github workflow {workflow} on {repository}@{ref}"
             )
         dispatch_started_at = time.time()
         req = urllib.request.Request(
@@ -315,6 +390,7 @@ class ImageManager:
             token=token,
             earliest_epoch=dispatch_started_at,
             progress_callback=progress_callback,
+            label=label,
         )
 
     def _wait_for_github_workflow_run(
@@ -324,6 +400,7 @@ class ImageManager:
         token: str,
         earliest_epoch: float,
         progress_callback: Callable[[str], None] | None = None,
+        label: str = "image",
     ) -> None:
         timeout_seconds = int(os.getenv("COMFY_ENDPOINTS_GHA_TIMEOUT_SECONDS", "1800"))
         poll_seconds = int(os.getenv("COMFY_ENDPOINTS_GHA_POLL_SECONDS", "10"))
@@ -339,7 +416,7 @@ class ImageManager:
             )
             if run is None:
                 if progress_callback:
-                    progress_callback("[image] waiting for workflow run to appear")
+                    progress_callback(f"[image:{label}] waiting for workflow run to appear")
                 time.sleep(poll_seconds)
                 continue
 
@@ -348,7 +425,7 @@ class ImageManager:
             conclusion = run.get("conclusion")
             state = f"{status}/{conclusion}"
             if progress_callback and state != last_state:
-                progress_callback(f"[image] workflow run {run_id} state={state}")
+                progress_callback(f"[image:{label}] workflow run {run_id} state={state}")
                 last_state = state
 
             if status == "completed":

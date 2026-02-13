@@ -12,16 +12,11 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _source_fingerprint(project_root: Path) -> str:
-    include_roots = [
-        project_root / "src",
-        project_root / "docker",
-        project_root / "comfy_plugin",
-        project_root / "pyproject.toml",
-    ]
+def _hash_paths(project_root: Path, include_roots: list[Path]) -> str:
     digest = hashlib.sha256()
     for root in include_roots:
         if root.is_file():
+            digest.update(str(root.relative_to(project_root)).encode("utf-8"))
             digest.update(root.read_bytes())
             continue
         if not root.exists():
@@ -56,15 +51,58 @@ def _git_fingerprint(project_root: Path) -> str | None:
         return None
 
 
-def compute_image_fingerprint(app_spec: AppSpecV1, dockerfile_contents: str, project_root: Path) -> str:
+def compute_comfybase_fingerprint(
+    app_spec: AppSpecV1,
+    dockerfile_contents: str,
+    project_root: Path,
+    comfyui_repo: str,
+    comfyui_ref: str,
+) -> str:
     plugin_refs = [f"{plugin.repo}@{plugin.ref}" for plugin in app_spec.build.plugins]
+    source_fingerprint = _hash_paths(
+        project_root,
+        [
+            project_root / "docker" / "Dockerfile.comfybase",
+        ],
+    )
+    payload = {
+        "comfy_version": app_spec.build.comfy_version,
+        "plugins": sorted(plugin_refs),
+        "comfyui_repo": comfyui_repo,
+        "comfyui_ref": comfyui_ref,
+        "dockerfile_sha256": _hash_text(dockerfile_contents),
+        "git_fingerprint": _git_fingerprint(project_root),
+        "source_fingerprint": source_fingerprint,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def compute_golden_fingerprint(
+    app_spec: AppSpecV1,
+    dockerfile_contents: str,
+    project_root: Path,
+    comfybase_image_ref: str,
+) -> str:
+    plugin_refs = [f"{plugin.repo}@{plugin.ref}" for plugin in app_spec.build.plugins]
+    source_fingerprint = _hash_paths(
+        project_root,
+        [
+            project_root / "src",
+            project_root / "docker" / "entrypoint.sh",
+            project_root / "docker" / "Dockerfile.golden",
+            project_root / "comfy_plugin",
+            project_root / "pyproject.toml",
+        ],
+    )
     payload = {
         "comfy_version": app_spec.build.comfy_version,
         "version": app_spec.version,
         "plugins": sorted(plugin_refs),
+        "comfybase_image_ref": comfybase_image_ref,
         "dockerfile_sha256": _hash_text(dockerfile_contents),
         "git_fingerprint": _git_fingerprint(project_root),
-        "source_fingerprint": _source_fingerprint(project_root),
+        "source_fingerprint": source_fingerprint,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return digest[:12]

@@ -15,7 +15,7 @@ from comfy_endpoints.models import (
     ProviderName,
 )
 from comfy_endpoints.runtime.image_manager import ImageManager
-from comfy_endpoints.runtime.image_resolver import resolve_golden_image
+from comfy_endpoints.runtime.image_resolver import resolve_comfybase_image, resolve_golden_image
 
 
 def _app_spec(tmp_root: Path) -> AppSpecV1:
@@ -43,6 +43,7 @@ def _app_spec(tmp_root: Path) -> AppSpecV1:
             comfy_version="0.3.26",
             plugins=[BuildPluginSpec(repo="https://example.com/plugin", ref="main")],
             image_repository="ghcr.io/comfy-endpoints/golden",
+            base_image_repository="ghcr.io/comfy-endpoints/comfybase",
         ),
     )
 
@@ -52,34 +53,47 @@ class ImageResolverAndManagerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             app_spec = _app_spec(Path(tmp_dir))
             app_spec.build.image_ref = "ghcr.io/custom/golden:fixed"
-            self.assertEqual(resolve_golden_image(app_spec), "ghcr.io/custom/golden:fixed")
+            self.assertEqual(
+                resolve_golden_image(app_spec, comfybase_image_ref="ghcr.io/example/base:tag"),
+                "ghcr.io/custom/golden:fixed",
+            )
 
     def test_resolver_generates_fingerprint_tag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             (root / "docker").mkdir(parents=True)
+            (root / "docker" / "Dockerfile.comfybase").write_text("FROM python:3.11-slim\n", encoding="utf-8")
             (root / "docker" / "Dockerfile.golden").write_text("FROM python:3.11-slim\n", encoding="utf-8")
             app_spec = _app_spec(root)
+            app_spec.build.base_dockerfile_path = str(root / "docker" / "Dockerfile.comfybase")
             app_spec.build.dockerfile_path = str(root / "docker" / "Dockerfile.golden")
-            image = resolve_golden_image(app_spec)
+            comfybase_image = resolve_comfybase_image(app_spec)
+            image = resolve_golden_image(app_spec, comfybase_image_ref=comfybase_image)
+            self.assertRegex(comfybase_image, r"^ghcr.io/comfy-endpoints/comfybase:0\.3\.26-base-[0-9a-f]{12}$")
             self.assertRegex(image, r"^ghcr.io/comfy-endpoints/golden:0\.3\.26-v1-[0-9a-f]{12}$")
 
     def test_image_manager_builds_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             (root / "docker").mkdir(parents=True)
+            (root / "docker" / "Dockerfile.comfybase").write_text("FROM python:3.11-slim\n", encoding="utf-8")
             (root / "docker" / "Dockerfile.golden").write_text("FROM python:3.11-slim\n", encoding="utf-8")
             app_spec = _app_spec(root)
+            app_spec.build.base_dockerfile_path = str(root / "docker" / "Dockerfile.comfybase")
             app_spec.build.dockerfile_path = str(root / "docker" / "Dockerfile.golden")
             app_spec.build.build_context = str(root)
+            app_spec.build.base_build_context = str(root)
 
             manager = ImageManager(project_root=root)
 
-            with mock.patch("comfy_endpoints.runtime.image_fingerprint._source_fingerprint", return_value="src-hash"):
+            with mock.patch("comfy_endpoints.runtime.image_fingerprint._hash_paths", return_value="src-hash"):
                 with mock.patch("comfy_endpoints.runtime.image_fingerprint._git_fingerprint", return_value="git-hash"):
                     with mock.patch.object(manager, "_docker_available", return_value=True):
                         with mock.patch("subprocess.run") as mocked_run:
                             mocked_run.side_effect = [
+                                mock.Mock(returncode=1, stdout="", stderr="not found"),
+                                mock.Mock(returncode=0, stdout="built", stderr=""),
+                                mock.Mock(returncode=0, stdout="exists", stderr=""),
                                 mock.Mock(returncode=1, stdout="", stderr="not found"),
                                 mock.Mock(returncode=0, stdout="built", stderr=""),
                                 mock.Mock(returncode=0, stdout="exists", stderr=""),
@@ -93,8 +107,10 @@ class ImageResolverAndManagerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             (root / "docker").mkdir(parents=True)
+            (root / "docker" / "Dockerfile.comfybase").write_text("FROM python:3.11-slim\n", encoding="utf-8")
             (root / "docker" / "Dockerfile.golden").write_text("FROM python:3.11-slim\n", encoding="utf-8")
             app_spec = _app_spec(root)
+            app_spec.build.base_dockerfile_path = str(root / "docker" / "Dockerfile.comfybase")
             app_spec.build.dockerfile_path = str(root / "docker" / "Dockerfile.golden")
 
             manager = ImageManager(project_root=root)
@@ -107,13 +123,13 @@ class ImageResolverAndManagerTest(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with mock.patch.object(manager, "_docker_available", return_value=False):
-                    with mock.patch.object(manager, "_registry_manifest_exists") as mocked_exists:
-                        mocked_exists.side_effect = [False, True]
-                        with mock.patch.object(manager, "_wait_for_github_workflow_run", return_value=None):
-                            with mock.patch("urllib.request.urlopen") as mocked_urlopen:
-                                mocked_urlopen.return_value.__enter__.return_value.status = 204
-                                result = manager.ensure_image(app_spec)
+                    with mock.patch.object(manager, "_docker_available", return_value=False):
+                        with mock.patch.object(manager, "_registry_manifest_exists") as mocked_exists:
+                            mocked_exists.side_effect = [False, True, False, True]
+                            with mock.patch.object(manager, "_wait_for_github_workflow_run", return_value=None):
+                                with mock.patch("urllib.request.urlopen") as mocked_urlopen:
+                                    mocked_urlopen.return_value.__enter__.return_value.status = 204
+                                    result = manager.ensure_image(app_spec)
 
             self.assertTrue(result.built)
 

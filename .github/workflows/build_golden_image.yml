@@ -17,6 +17,11 @@ on:
         required: true
         default: .
         type: string
+      build_args:
+        description: Newline-separated docker build args (KEY=VALUE)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -50,3 +55,4 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ${{ inputs.image_ref }}
+          build-args: ${{ inputs.build_args }}
