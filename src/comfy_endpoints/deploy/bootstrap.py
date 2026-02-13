@@ -141,6 +141,78 @@ def _missing_models_from_preflight_error(exc: ComfyClientError) -> list[MissingM
     return parsed
 
 
+def _extract_dropdown_options(input_spec: object) -> set[str]:
+    if not isinstance(input_spec, list) or not input_spec:
+        return set()
+
+    first = input_spec[0]
+    if isinstance(first, list):
+        return {str(item) for item in first if isinstance(item, str)}
+
+    return set()
+
+
+def _missing_models_from_object_info(
+    prompt_payload: dict,
+    object_info_payload: dict,
+) -> list[MissingModelRequirement]:
+    prompt = prompt_payload.get("prompt")
+    if not isinstance(prompt, dict):
+        return []
+
+    parsed: list[MissingModelRequirement] = []
+    seen: set[tuple[str, str]] = set()
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str) or not class_type:
+            continue
+
+        class_info = object_info_payload.get(class_type)
+        if not isinstance(class_info, dict):
+            continue
+
+        input_block = class_info.get("input")
+        if not isinstance(input_block, dict):
+            continue
+
+        required = input_block.get("required")
+        optional = input_block.get("optional")
+        if not isinstance(required, dict):
+            required = {}
+        if not isinstance(optional, dict):
+            optional = {}
+
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+
+        for input_name, value in inputs.items():
+            if not isinstance(input_name, str) or not isinstance(value, str):
+                continue
+            if not value:
+                continue
+
+            input_spec = required.get(input_name)
+            if input_spec is None:
+                input_spec = optional.get(input_name)
+
+            options = _extract_dropdown_options(input_spec)
+            if not options:
+                continue
+            if value in options:
+                continue
+
+            key = (input_name, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            parsed.append(MissingModelRequirement(input_name=input_name, filename=value))
+
+    return parsed
+
+
 def _iter_model_entries(payload: object) -> list[dict]:
     entries: list[dict] = []
 
@@ -297,6 +369,7 @@ def run_bootstrap(
         preflight_payload = build_preflight_payload(workflow_payload, contract)
         comfy_client = ComfyClient("http://127.0.0.1:8188")
         max_preflight_attempts = int(os.getenv("COMFY_ENDPOINTS_PREFLIGHT_MAX_ATTEMPTS", "8"))
+        object_info_payload: dict | None = None
         for attempt in range(1, max_preflight_attempts + 1):
             try:
                 preflight_prompt_id = comfy_client.queue_prompt(preflight_payload)
@@ -307,6 +380,16 @@ def run_bootstrap(
                 break
             except ComfyClientError as exc:
                 missing_models = _missing_models_from_preflight_error(exc)
+                if not missing_models:
+                    if object_info_payload is None:
+                        try:
+                            object_info_payload = comfy_client.get_object_info()
+                        except ComfyClientError:
+                            object_info_payload = {}
+                    missing_models = _missing_models_from_object_info(
+                        prompt_payload=preflight_payload,
+                        object_info_payload=object_info_payload,
+                    )
                 if not missing_models or attempt == max_preflight_attempts:
                     raise
 

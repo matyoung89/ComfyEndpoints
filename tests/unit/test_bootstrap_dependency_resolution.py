@@ -9,6 +9,7 @@ from comfy_endpoints.deploy.bootstrap import (
     MissingModelRequirement,
     _install_missing_models,
     _iter_model_entries,
+    _missing_models_from_object_info,
     _missing_models_from_preflight_error,
 )
 from comfy_endpoints.gateway.comfy_client import ComfyClientError
@@ -79,6 +80,50 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
             mocked_download.assert_called_once()
             target_path = mocked_download.call_args.args[1]
             self.assertEqual(str(target_path), str(root / "models" / "text_encoders" / "clip_l.safetensors"))
+
+    def test_missing_models_parse_from_object_info_dropdown_mismatch(self) -> None:
+        prompt_payload = {
+            "prompt": {
+                "2": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-schnell.safetensors"},
+                },
+                "3": {
+                    "class_type": "DualCLIPLoader",
+                    "inputs": {
+                        "clip_name1": "clip_l.safetensors",
+                        "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+                    },
+                },
+                "4": {
+                    "class_type": "VAELoader",
+                    "inputs": {"vae_name": "ae.safetensors"},
+                },
+            }
+        }
+        object_info_payload = {
+            "UNETLoader": {"input": {"required": {"unet_name": [["other_unet.safetensors"]]}}},
+            "DualCLIPLoader": {
+                "input": {
+                    "required": {
+                        "clip_name1": [["other_clip.safetensors"]],
+                        "clip_name2": [["other_t5.safetensors"]],
+                    }
+                }
+            },
+            "VAELoader": {"input": {"required": {"vae_name": [["pixel_space"]]}}},
+        }
+
+        parsed = _missing_models_from_object_info(prompt_payload, object_info_payload)
+        self.assertEqual(
+            parsed,
+            [
+                MissingModelRequirement(input_name="unet_name", filename="flux1-schnell.safetensors"),
+                MissingModelRequirement(input_name="clip_name1", filename="clip_l.safetensors"),
+                MissingModelRequirement(input_name="clip_name2", filename="t5xxl_fp8_e4m3fn.safetensors"),
+                MissingModelRequirement(input_name="vae_name", filename="ae.safetensors"),
+            ],
+        )
 
 
 if __name__ == "__main__":

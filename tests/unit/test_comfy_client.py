@@ -44,6 +44,15 @@ class ComfyClientTest(unittest.TestCase):
             with self.assertRaises(ComfyClientError):
                 client.get_history("abc")
 
+    def test_get_object_info_returns_payload(self) -> None:
+        client = ComfyClient("http://127.0.0.1:8188")
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=_MockResponse(json.dumps({"UNETLoader": {"input": {}}}).encode("utf-8")),
+        ):
+            payload = client.get_object_info()
+        self.assertIn("UNETLoader", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

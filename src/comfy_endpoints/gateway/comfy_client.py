@@ -123,3 +123,9 @@ class ComfyClient:
             return json.loads(body or "[]")
         except json.JSONDecodeError as exc:
             raise ComfyClientError("Comfy manager external model list returned invalid JSON") from exc
+
+    def get_object_info(self) -> dict:
+        payload = self._request_json("/object_info", method="GET")
+        if not isinstance(payload, dict):
+            raise ComfyClientError("Comfy object_info returned non-object JSON")
+        return payload
