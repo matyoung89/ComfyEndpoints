@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from comfy_endpoints.contracts.validators import parse_workflow_contract
 from comfy_endpoints.gateway.comfy_client import ComfyClient, ComfyClientError
-from comfy_endpoints.gateway.job_store import JobStore
+from comfy_endpoints.gateway.job_store import FileRecord, JobStore
 from comfy_endpoints.gateway.prompt_mapper import (
     PromptMappingError,
     map_contract_payload_to_prompt,
@@ -66,7 +67,6 @@ class GatewayApp:
 
         return True, "ok"
 
-
 class GatewayHandler(BaseHTTPRequestHandler):
     app: GatewayApp
 
@@ -82,17 +82,136 @@ class GatewayHandler(BaseHTTPRequestHandler):
         provided = self.headers.get("x-api-key", "")
         return is_authorized(provided, self.app.config.api_key)
 
+    @staticmethod
+    def _file_payload(record: FileRecord) -> dict:
+        return {
+            "file_id": record.file_id,
+            "media_type": record.media_type,
+            "size_bytes": record.size_bytes,
+            "sha256": record.sha256_hex,
+            "source": record.source,
+            "app_id": record.app_id,
+            "original_name": record.original_name,
+            "created_at": record.created_at,
+            "download_path": f"/files/{record.file_id}/download",
+        }
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/healthz":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        if path == "/healthz":
             self._json_response(HTTPStatus.OK, {"status": "ok"})
             return
 
-        if self.path.startswith("/jobs/"):
+        if path == "/contract":
             if not self._authorized():
                 self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
 
-            job_id = self.path.split("/jobs/", 1)[1]
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "contract_id": self.app.contract.contract_id,
+                    "version": self.app.contract.version,
+                    "inputs": [
+                        {
+                            "name": field.name,
+                            "type": field.type,
+                            "required": field.required,
+                            "node_id": field.node_id,
+                        }
+                        for field in self.app.contract.inputs
+                    ],
+                    "outputs": [
+                        {
+                            "name": field.name,
+                            "type": field.type,
+                            "node_id": field.node_id,
+                        }
+                        for field in self.app.contract.outputs
+                    ],
+                },
+            )
+            return
+
+        if path == "/files":
+            if not self._authorized():
+                self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+
+            try:
+                limit = int(query.get("limit", ["50"])[0])
+            except ValueError:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "invalid_limit"})
+                return
+
+            cursor = query.get("cursor", [None])[0]
+            media_type = query.get("media_type", [None])[0]
+            source = query.get("source", [None])[0]
+            app_id = query.get("app_id", [None])[0]
+            try:
+                files, next_cursor = self.app.job_store.list_files(
+                    limit=limit,
+                    cursor=cursor,
+                    media_type=media_type,
+                    source=source,
+                    app_id=app_id,
+                )
+            except ValueError:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "invalid_cursor"})
+                return
+
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "items": [self._file_payload(item) for item in files],
+                    "next_cursor": next_cursor,
+                },
+            )
+            return
+
+        if path.startswith("/files/"):
+            if not self._authorized():
+                self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+
+            suffix = path.split("/files/", 1)[1]
+            if suffix.endswith("/download"):
+                file_id = suffix[: -len("/download")]
+                record = self.app.job_store.get_file(file_id)
+                if not record or not record.storage_path.exists():
+                    self._json_response(HTTPStatus.NOT_FOUND, {"error": "file_not_found"})
+                    return
+
+                content = record.storage_path.read_bytes()
+                filename = record.original_name or record.storage_path.name
+                self.send_response(HTTPStatus.OK)
+                self.send_header("content-type", record.media_type or "application/octet-stream")
+                self.send_header("content-length", str(len(content)))
+                self.send_header(
+                    "content-disposition",
+                    f'attachment; filename="{filename}"',
+                )
+                self.end_headers()
+                self.wfile.write(content)
+                return
+
+            file_id = suffix
+            record = self.app.job_store.get_file(file_id)
+            if not record:
+                self._json_response(HTTPStatus.NOT_FOUND, {"error": "file_not_found"})
+                return
+            self._json_response(HTTPStatus.OK, self._file_payload(record))
+            return
+
+        if path.startswith("/jobs/"):
+            if not self._authorized():
+                self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+
+            job_id = path.split("/jobs/", 1)[1]
             record = self.app.job_store.get(job_id)
             if not record:
                 self._json_response(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
@@ -112,7 +231,37 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self._json_response(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/run":
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/files":
+            if not self._authorized():
+                self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+
+            content_length = int(self.headers.get("content-length", "0"))
+            if content_length <= 0:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "empty_file"})
+                return
+            payload = self.rfile.read(content_length)
+            media_type = self.headers.get("content-type", "application/octet-stream")
+            original_name = self.headers.get("x-file-name", "")
+            app_id = self.headers.get("x-app-id", "").strip() or None
+            try:
+                record = self.app.job_store.create_file(
+                    content=payload,
+                    media_type=media_type,
+                    source="uploaded",
+                    app_id=app_id,
+                    original_name=original_name,
+                )
+            except ValueError as exc:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._json_response(HTTPStatus.CREATED, self._file_payload(record))
+            return
+
+        if path != "/run":
             self._json_response(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
 

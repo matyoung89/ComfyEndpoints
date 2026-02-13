@@ -45,6 +45,23 @@ class DeploymentStore:
             metadata=raw.get("metadata", {}),
         )
 
+    def list_records(self) -> list[DeploymentRecord]:
+        data = self._load()
+        records: list[DeploymentRecord] = []
+        for raw in data.values():
+            records.append(
+                DeploymentRecord(
+                    app_id=raw["app_id"],
+                    deployment_id=raw["deployment_id"],
+                    provider=ProviderName(raw["provider"]),
+                    state=DeploymentState(raw["state"]),
+                    endpoint_url=raw.get("endpoint_url"),
+                    api_key_ref=raw.get("api_key_ref"),
+                    metadata=raw.get("metadata", {}),
+                )
+            )
+        return records
+
     def delete(self, app_id: str) -> None:
         data = self._load()
         if app_id in data:

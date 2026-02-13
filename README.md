@@ -21,6 +21,15 @@ comfy-endpoints deploy /Users/mat/Projects/ComfyEndpoints/apps/demo/app.yaml
 - `comfy-endpoints status <app_id> [--state-dir DIR]`
 - `comfy-endpoints logs <app_id> [--state-dir DIR]`
 - `comfy-endpoints destroy <app_spec>`
+- `comfy-endpoints endpoints list`
+- `comfy-endpoints endpoints describe <app_id>`
+- `comfy-endpoints invoke <app_id> [--input-json JSON] [--wait] [--timeout-seconds N] [--poll-seconds N] [dynamic --input-* flags]`
+- `comfy-endpoints <app_id> [dynamic --input-* flags]` (shorthand for `invoke`)
+- `comfy-endpoints files list [--limit N] [--cursor CURSOR] [--media-type TYPE] [--source uploaded|generated] [--app-id APP_ID] [--app-id-filter APP_ID]`
+- `comfy-endpoints files get <file_id> [--app-id APP_ID]`
+- `comfy-endpoints files download <file_id> --out <path> [--app-id APP_ID]`
+- `comfy-endpoints files upload --in <path> [--media-type TYPE] [--file-name NAME] [--app-id APP_ID]`
+- `comfy-endpoints completion zsh|bash`
 
 ## RunPod Deployment Details
 
@@ -117,3 +126,38 @@ Compose stack files:
 - `/Users/mat/Projects/ComfyEndpoints/docker/docker-compose.stack.yml`
 - `/Users/mat/Projects/ComfyEndpoints/docker/nginx.compose.conf`
 - `/Users/mat/Projects/ComfyEndpoints/docker/comfy_mock_server.py`
+
+## Gateway File APIs
+
+Gateway now supports remote file storage and retrieval:
+
+- `POST /files` (auth required): upload file body, returns `file_id` and metadata.
+  - Optional headers: `x-file-name`, `x-app-id`
+- `GET /files` (auth required): list files with filters (`cursor`, `limit`, `media_type`, `source`, `app_id`)
+- `GET /files/<file_id>` (auth required): fetch metadata
+- `GET /files/<file_id>/download` (auth required): download binary file content
+
+## Dynamic Invoke CLI
+
+Contract-driven flags are discovered from `GET /contract` on the endpoint:
+
+- non-media input: `--input-<name> <value>`
+- media input: `--input-<name>-file <path>` or `--input-<name>-id <file_id>`
+
+Examples:
+
+```bash
+comfy-endpoints endpoints describe demo
+comfy-endpoints demo --input-prompt "a lighthouse in heavy fog"
+comfy-endpoints invoke demo --input-image-file ./input.png --wait
+```
+
+Shell completion:
+
+```bash
+# bash
+eval "$(comfy-endpoints completion bash)"
+
+# zsh
+eval "$(comfy-endpoints completion zsh)"
+```
