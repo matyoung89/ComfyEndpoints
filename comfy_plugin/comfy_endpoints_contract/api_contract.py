@@ -42,6 +42,7 @@ class ApiOutputNode:
     RETURN_NAMES = ("value",)
     FUNCTION = "execute"
     CATEGORY = "ComfyEndpoints"
+    OUTPUT_NODE = True
 
     def execute(self, name: str, type: str, value: str) -> tuple[str]:
         _ = (name, type)
