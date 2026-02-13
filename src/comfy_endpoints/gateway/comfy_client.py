@@ -101,8 +101,9 @@ class ComfyClient:
             raise ComfyClientError(f"Comfy view connection error: {exc.reason}") from exc
 
     def get_external_models(self) -> object:
+        query = urllib.parse.urlencode({"mode": "default"})
         request = urllib.request.Request(
-            f"{self.base_url}/externalmodel/getlist",
+            f"{self.base_url}/externalmodel/getlist?{query}",
             headers={"accept": "application/json"},
             method="GET",
         )

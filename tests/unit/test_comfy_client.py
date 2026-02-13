@@ -53,6 +53,17 @@ class ComfyClientTest(unittest.TestCase):
             payload = client.get_object_info()
         self.assertIn("UNETLoader", payload)
 
+    def test_get_external_models_uses_mode_query(self) -> None:
+        client = ComfyClient("http://127.0.0.1:8188")
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=_MockResponse(json.dumps({"models": []}).encode("utf-8")),
+        ) as mocked_urlopen:
+            _ = client.get_external_models()
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertIn("/externalmodel/getlist?mode=default", request.full_url)
+
 
 if __name__ == "__main__":
     unittest.main()
