@@ -82,6 +82,7 @@ def run_bootstrap(
     workflow_path: Path,
     api_key: str,
     gateway_port: int,
+    app_id: str | None = None,
 ) -> int:
     ensure_contract_file(contract_path)
     ensure_workflow_file(workflow_path)
@@ -109,6 +110,8 @@ def run_bootstrap(
         f"--workflow-path {shlex.quote(str(workflow_path))} "
         "--comfy-url http://127.0.0.1:8188"
     )
+    if app_id:
+        gateway_command = f"{gateway_command} --app-id {shlex.quote(app_id)}"
 
     comfy_process = subprocess.Popen(shlex.split(comfy_command))
     gateway_process = None
@@ -164,6 +167,7 @@ def main() -> int:
     parser.add_argument("--workflow-path", required=True)
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--gateway-port", type=int, default=3000)
+    parser.add_argument("--app-id", default=None)
     args = parser.parse_args()
 
     return run_bootstrap(
@@ -174,6 +178,7 @@ def main() -> int:
         workflow_path=Path(args.workflow_path),
         api_key=args.api_key,
         gateway_port=args.gateway_port,
+        app_id=str(args.app_id).strip() if args.app_id else None,
     )
 
 

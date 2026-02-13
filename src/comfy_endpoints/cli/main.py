@@ -44,7 +44,33 @@ def _cmd_init(args: argparse.Namespace) -> int:
     app_spec_file = app_dir / "app.yaml"
 
     if not workflow_file.exists():
-        workflow_file.write_text("{}\n", encoding="utf-8")
+        workflow_file.write_text(
+            json.dumps(
+                {
+                    "prompt": {
+                        "1": {
+                            "class_type": "ApiInput",
+                            "inputs": {
+                                "name": "prompt",
+                                "type": "string",
+                                "required": True,
+                                "value": "",
+                            },
+                        },
+                        "2": {
+                            "class_type": "ApiOutput",
+                            "inputs": {
+                                "name": "image",
+                                "type": "image/png",
+                                "value": "",
+                            },
+                        },
+                    }
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     if not contract_file.exists():
         contract_payload = {
@@ -55,14 +81,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
                     "name": "prompt",
                     "type": "string",
                     "required": True,
-                    "node_id": "api_input_prompt",
+                    "node_id": "1",
                 }
             ],
             "outputs": [
                 {
                     "name": "image",
                     "type": "image/png",
-                    "node_id": "api_output_image",
+                    "node_id": "2",
                 }
             ],
         }

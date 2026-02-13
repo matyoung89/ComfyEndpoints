@@ -65,6 +65,15 @@ class OutbidThenReadyProvider(FakeProvider):
 
 
 class DeploymentServiceTest(unittest.TestCase):
+    @staticmethod
+    def _workflow_payload() -> dict:
+        return {
+            "prompt": {
+                "1": {"class_type": "ApiInput", "inputs": {"value": ""}},
+                "9": {"class_type": "ApiOutput", "inputs": {"name": "image", "type": "image/png"}},
+            }
+        }
+
     def test_new_log_lines_detects_incremental_append(self) -> None:
         previous = "one\ntwo"
         current = "one\ntwo\nthree\nfour"
@@ -78,7 +87,7 @@ class DeploymentServiceTest(unittest.TestCase):
             workflow_path = root / "workflow.json"
             contract_path = root / "workflow.contract.json"
 
-            workflow_path.write_text("{}", encoding="utf-8")
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
             contract_path.write_text(
                 json.dumps(
                     {
@@ -163,7 +172,7 @@ class DeploymentServiceTest(unittest.TestCase):
             workflow_path = root / "workflow.json"
             contract_path = root / "workflow.contract.json"
 
-            workflow_path.write_text("{}", encoding="utf-8")
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
             contract_path.write_text(
                 json.dumps(
                     {
@@ -238,7 +247,7 @@ class DeploymentServiceTest(unittest.TestCase):
             workflow_path = root / "workflow.json"
             contract_path = root / "workflow.contract.json"
 
-            workflow_path.write_text("{}", encoding="utf-8")
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
             contract_path.write_text(
                 json.dumps(
                     {

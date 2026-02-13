@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from comfy_endpoints.contracts.parser import ContractError, load_structured_file
@@ -33,6 +35,10 @@ REQUIRED_APP_FIELDS = {
 
 class ValidationError(ValueError):
     pass
+
+
+SCALAR_CONTRACT_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
+MEDIA_TYPE_PATTERN = re.compile(r"^(image|video|audio|file)/[A-Za-z0-9][A-Za-z0-9.+-]*$")
 
 
 def _expect_fields(mapping: dict, required: set[str], context: str) -> None:
@@ -147,12 +153,77 @@ def parse_workflow_contract(path: Path) -> WorkflowApiContractV1:
     if not outputs:
         raise ValidationError("Workflow contract must declare at least one output")
 
+    _validate_output_fields(outputs)
+
     return WorkflowApiContractV1(
         contract_id=str(raw["contract_id"]),
         version=str(raw["version"]),
         inputs=inputs,
         outputs=outputs,
     )
+
+
+def _is_supported_output_type(type_name: str) -> bool:
+    normalized = type_name.strip().lower()
+    if normalized in SCALAR_CONTRACT_TYPES:
+        return True
+    return bool(MEDIA_TYPE_PATTERN.fullmatch(normalized))
+
+
+def _validate_output_fields(outputs: list[ContractOutputField]) -> None:
+    names_seen: set[str] = set()
+    for field in outputs:
+        normalized_name = field.name.strip()
+        if not normalized_name:
+            raise ValidationError("Workflow contract output names must be non-empty")
+        if normalized_name in names_seen:
+            raise ValidationError(f"Workflow contract outputs must have unique names: {normalized_name}")
+        names_seen.add(normalized_name)
+
+        if not _is_supported_output_type(field.type):
+            raise ValidationError(f"Unsupported workflow output type: {field.type}")
+
+
+def _workflow_node_class_map(workflow_payload: dict) -> dict[str, str]:
+    node_map: dict[str, str] = {}
+
+    prompt = workflow_payload.get("prompt")
+    if isinstance(prompt, dict):
+        for node_id, node in prompt.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = node.get("class_type")
+            if not class_type:
+                continue
+            node_map[str(node_id)] = str(class_type)
+
+    nodes = workflow_payload.get("nodes")
+    if isinstance(nodes, list):
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = node.get("id")
+            class_type = node.get("class_type") or node.get("type")
+            if node_id is None or not class_type:
+                continue
+            node_map[str(node_id)] = str(class_type)
+
+    return node_map
+
+
+def _validate_contract_output_nodes(workflow_payload: dict, contract: WorkflowApiContractV1) -> None:
+    node_map = _workflow_node_class_map(workflow_payload)
+    if not node_map:
+        raise ValidationError("Workflow must include nodes or prompt graph for output validation")
+
+    for field in contract.outputs:
+        class_type = node_map.get(field.node_id)
+        if class_type is None:
+            raise ValidationError(f"Workflow output node missing for contract output '{field.name}': {field.node_id}")
+        if class_type.strip().lower() != "apioutput":
+            raise ValidationError(
+                f"Workflow output node '{field.node_id}' for output '{field.name}' must be ApiOutput"
+            )
 
 
 def validate_deployable_spec(path: Path) -> tuple[AppSpecV1, WorkflowApiContractV1]:
@@ -168,6 +239,10 @@ def validate_deployable_spec(path: Path) -> tuple[AppSpecV1, WorkflowApiContract
         )
 
     contract = parse_workflow_contract(contract_path)
+    workflow_payload = json.loads(app_spec.workflow_path.read_text(encoding="utf-8"))
+    if not isinstance(workflow_payload, dict):
+        raise ValidationError(f"Workflow file must contain a JSON object: {app_spec.workflow_path}")
+    _validate_contract_output_nodes(workflow_payload, contract)
     return app_spec, contract
 
 

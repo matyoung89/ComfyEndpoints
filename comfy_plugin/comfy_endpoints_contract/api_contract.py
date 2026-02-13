@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+
+SCALAR_CONTRACT_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
+MEDIA_TYPE_PATTERN = re.compile(r"^(image|video|audio|file)/[A-Za-z0-9][A-Za-z0-9.+-]*$")
 
 
 class ApiInputNode:
@@ -34,7 +39,7 @@ class ApiOutputNode:
             "required": {
                 "name": ("STRING", {"default": "image"}),
                 "type": ("STRING", {"default": "image/png"}),
-                "value": ("STRING", {"default": ""}),
+                "value": ("*", {"forceInput": True}),
             }
         }
 
@@ -44,9 +49,13 @@ class ApiOutputNode:
     CATEGORY = "ComfyEndpoints"
     OUTPUT_NODE = True
 
-    def execute(self, name: str, type: str, value: str) -> tuple[str]:
-        _ = (name, type)
-        return (value,)
+    def execute(self, name: str, type: str, value: object) -> tuple[str]:
+        output_payload = {
+            "name": name,
+            "type": type,
+            "value": value,
+        }
+        return (json.dumps(output_payload, default=str),)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -58,6 +67,31 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ApiInput": "ComfyEndpoints API Input",
     "ApiOutput": "ComfyEndpoints API Output",
 }
+
+
+def _is_supported_output_type(type_name: str) -> bool:
+    normalized = type_name.strip().lower()
+    if normalized in SCALAR_CONTRACT_TYPES:
+        return True
+    return bool(MEDIA_TYPE_PATTERN.fullmatch(normalized))
+
+
+def validate_contract_nodes(inputs: list[dict[str, Any]], outputs: list[dict[str, Any]]) -> None:
+    if not inputs or not outputs:
+        raise ValueError("Workflow must include at least one ApiInput and one ApiOutput node")
+
+    seen_names: set[str] = set()
+    for item in outputs:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError("ApiOutput name is required")
+        if name in seen_names:
+            raise ValueError(f"Duplicate ApiOutput name: {name}")
+        seen_names.add(name)
+
+        output_type = str(item.get("type", "")).strip()
+        if not _is_supported_output_type(output_type):
+            raise ValueError(f"Unsupported ApiOutput type: {output_type}")
 
 
 def export_contract_from_workflow(workflow_path: Path, output_path: Path) -> None:
@@ -96,8 +130,7 @@ def export_contract_from_workflow(workflow_path: Path, output_path: Path) -> Non
                 }
             )
 
-    if not inputs or not outputs:
-        raise ValueError("Workflow must include at least one ApiInput and one ApiOutput node")
+    validate_contract_nodes(inputs=inputs, outputs=outputs)
 
     payload = {
         "contract_id": f"{workflow_path.stem}-contract",
