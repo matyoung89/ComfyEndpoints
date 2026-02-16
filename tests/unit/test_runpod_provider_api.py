@@ -103,6 +103,38 @@ class RunpodProviderApiTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "min_vram_gb=80"):
                 provider.create_deployment(app_spec)
 
+    def test_gpu_type_ids_with_min_vram_filters_to_rest_openapi_enum(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(
+            provider,
+            "_graphql_request",
+            return_value={
+                "gpuTypes": [
+                    {"id": "NVIDIA H100 PCIe", "displayName": "H100 PCIe", "memoryInGb": 80},
+                    {"id": "NVIDIA B300 SXM6 AC", "displayName": "B300", "memoryInGb": 288},
+                ]
+            },
+        ):
+            with mock.patch.object(provider, "_rest_gpu_type_enum", return_value={"NVIDIA H100 PCIe", "NVIDIA H200"}):
+                gpu_type_ids = provider._gpu_type_ids_with_min_vram(64)
+
+        self.assertEqual(gpu_type_ids, ["NVIDIA H100 PCIe"])
+
+    def test_gpu_type_ids_with_min_vram_fails_when_no_rest_enum_overlap(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(
+            provider,
+            "_graphql_request",
+            return_value={
+                "gpuTypes": [
+                    {"id": "NVIDIA B300 SXM6 AC", "displayName": "B300", "memoryInGb": 288},
+                ]
+            },
+        ):
+            with mock.patch.object(provider, "_rest_gpu_type_enum", return_value={"NVIDIA H100 PCIe", "NVIDIA H200"}):
+                with self.assertRaisesRegex(RuntimeError, "no overlap"):
+                    provider._gpu_type_ids_with_min_vram(64)
+
     def test_ensure_volume_patches_when_too_small(self) -> None:
         provider = RunpodProvider()
         with mock.patch.object(provider, "_rest_request") as mocked_rest:

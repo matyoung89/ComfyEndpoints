@@ -38,6 +38,7 @@ class RunpodProvider(CloudProviderAdapter):
     def __init__(self, config: RunpodConfig | None = None):
         self.config = config or RunpodConfig()
         self._create_profile_index = 0
+        self._rest_gpu_type_enum_cache: set[str] | None = None
 
     @staticmethod
     def _parse_bool(raw: str) -> bool:
@@ -240,7 +241,53 @@ class RunpodProvider(CloudProviderAdapter):
             raise RunpodError(
                 f"No RunPod GPU types satisfy min_vram_gb={min_vram_gb}. Available: {details}"
             )
+
+        allowed_gpu_type_ids = self._rest_gpu_type_enum()
+        if allowed_gpu_type_ids:
+            filtered = [item for item in candidate_ids if item in allowed_gpu_type_ids]
+            if not filtered:
+                raise RunpodError(
+                    "RunPod GraphQL GPU catalog and REST schema have no overlap for "
+                    f"min_vram_gb={min_vram_gb}. Candidates: {', '.join(candidate_ids[:20])}"
+                )
+            candidate_ids = filtered
         return candidate_ids
+
+    def _rest_gpu_type_enum(self) -> set[str] | None:
+        if self._rest_gpu_type_enum_cache is not None:
+            return self._rest_gpu_type_enum_cache
+
+        try:
+            spec = self._rest_request("GET", "/openapi.json")
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(spec, dict):
+            return None
+
+        try:
+            body_schema = (
+                spec["paths"]["/pods"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+            )
+            if isinstance(body_schema, dict) and "$ref" in body_schema:
+                ref_name = str(body_schema["$ref"]).split("/")[-1]
+                body_schema = spec["components"]["schemas"][ref_name]
+            props = body_schema.get("properties", {})
+            gpu_type_ids_schema = props.get("gpuTypeIds", {})
+            items = gpu_type_ids_schema.get("items", {})
+            if isinstance(items, dict) and "$ref" in items:
+                ref_name = str(items["$ref"]).split("/")[-1]
+                items = spec["components"]["schemas"][ref_name]
+            enum_values = items.get("enum", [])
+        except Exception:  # noqa: BLE001
+            return None
+
+        if not isinstance(enum_values, list):
+            return None
+        normalized = {str(item).strip() for item in enum_values if str(item).strip()}
+        if not normalized:
+            return None
+        self._rest_gpu_type_enum_cache = normalized
+        return normalized
 
     @staticmethod
     def _collect_log_lines(payload: Any, lines: list[str]) -> None:
