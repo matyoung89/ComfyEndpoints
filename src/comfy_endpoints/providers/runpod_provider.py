@@ -29,6 +29,7 @@ class RunpodConfig:
     default_data_center_id: str = "US-KS-2"
     default_cloud_type: str = "COMMUNITY"
     default_interruptible: bool = True
+    user_agent: str = "comfy-endpoints/1.0"
 
 
 class RunpodProvider(CloudProviderAdapter):
@@ -130,6 +131,7 @@ class RunpodProvider(CloudProviderAdapter):
             headers={
                 "content-type": "application/json",
                 "authorization": f"Bearer {self._api_key()}",
+                "user-agent": self.config.user_agent,
             },
             method=method,
         )
@@ -164,6 +166,7 @@ class RunpodProvider(CloudProviderAdapter):
             headers={
                 "content-type": "application/json",
                 "authorization": f"Bearer {self._api_key()}",
+                "user-agent": self.config.user_agent,
             },
             method="POST",
         )
