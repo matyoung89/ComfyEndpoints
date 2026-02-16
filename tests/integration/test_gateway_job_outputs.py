@@ -15,8 +15,10 @@ class _FakeComfyClient:
     def __init__(self, outputs: dict, skip_artifact_names: set[str] | None = None):
         self.outputs = outputs
         self.skip_artifact_names = skip_artifact_names or set()
+        self.last_prompt_payload: dict | None = None
 
     def queue_prompt(self, prompt_payload: dict) -> str:
+        self.last_prompt_payload = prompt_payload
         prompt = prompt_payload.get("prompt", {})
         if isinstance(prompt, dict):
             for node_id, node in prompt.items():
@@ -330,6 +332,101 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
             self.assertTrue(caption_artifact.exists())
             self.assertEqual(image_artifact.read_text(encoding="utf-8"), str(result["image"]))
             self.assertEqual(caption_artifact.read_text(encoding="utf-8"), "done")
+
+    def test_run_accepts_media_file_ids_for_two_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            os.environ["COMFY_ENDPOINTS_ARTIFACTS_DIR"] = str(root / "artifacts")
+            os.environ["COMFY_ENDPOINTS_STATE_DB"] = str(root / "jobs.db")
+
+            contract_path = root / "workflow.contract.json"
+            workflow_path = root / "workflow.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "wanimate-contract",
+                        "version": "v1",
+                        "inputs": [
+                            {"name": "reference_image", "type": "image/png", "required": True, "node_id": "1"},
+                            {"name": "driving_video", "type": "video/mp4", "required": True, "node_id": "2"},
+                        ],
+                        "outputs": [{"name": "output_video", "type": "video/mp4", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            workflow_path.write_text(
+                json.dumps(
+                    {
+                        "prompt": {
+                            "1": {"class_type": "ApiInput", "inputs": {"value": ""}},
+                            "2": {"class_type": "ApiInput", "inputs": {"value": ""}},
+                            "9": {
+                                "class_type": "ApiOutput",
+                                "inputs": {"name": "output_video", "type": "video/mp4", "value": ""},
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            app = GatewayApp(
+                GatewayConfig(
+                    listen_host="127.0.0.1",
+                    listen_port=3000,
+                    api_key="secret",
+                    comfy_url="http://127.0.0.1:8188",
+                    contract_path=contract_path,
+                    workflow_path=workflow_path,
+                    state_db=root / "jobs.db",
+                    app_id="wanimate",
+                )
+            )
+            reference = app.job_store.create_file(
+                content=b"png-bytes",
+                media_type="image/png",
+                source="uploaded",
+                app_id="wanimate",
+                original_name="reference.png",
+            )
+            driving = app.job_store.create_file(
+                content=b"mp4-bytes",
+                media_type="video/mp4",
+                source="uploaded",
+                app_id="wanimate",
+                original_name="driving.mp4",
+            )
+            app.comfy_client = _FakeComfyClient(
+                outputs={"9": {"value": ["fid_mock_output_video"]}},
+            )
+
+            body = json.dumps(
+                {
+                    "reference_image": reference.file_id,
+                    "driving_video": driving.file_id,
+                }
+            ).encode("utf-8")
+            run_request = (
+                b"POST /run HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"x-api-key: secret\r\n"
+                b"content-type: application/json\r\n"
+                b"connection: close\r\n"
+                + f"content-length: {len(body)}\r\n\r\n".encode("ascii")
+                + body
+            )
+            status, _headers, _payload_body = self._round_trip(app, run_request)
+            self.assertEqual(status, 202)
+
+            for _ in range(20):
+                if app.comfy_client.last_prompt_payload is not None:
+                    break
+                time.sleep(0.02)
+            assert app.comfy_client.last_prompt_payload is not None
+            prompt = app.comfy_client.last_prompt_payload["prompt"]
+            self.assertEqual(prompt["1"]["inputs"]["value"], reference.file_id)
+            self.assertEqual(prompt["2"]["inputs"]["value"], driving.file_id)
 
 
 if __name__ == "__main__":

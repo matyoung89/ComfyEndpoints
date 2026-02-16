@@ -81,6 +81,7 @@ class PromptMapperTest(unittest.TestCase):
         payload = map_contract_payload_to_prompt(workflow, _contract(), {"prompt": "hello"})
         self.assertEqual(payload["prompt"]["1"]["class_type"], "ApiInput")
         self.assertEqual(payload["prompt"]["1"]["inputs"]["value"], "hello")
+        self.assertIn("ce_state_db", payload["prompt"]["1"]["inputs"])
         self.assertEqual(payload["prompt"]["2"]["inputs"]["ce_job_id"], "")
         self.assertIn("ce_artifacts_dir", payload["prompt"]["2"]["inputs"])
         self.assertIn("ce_state_db", payload["prompt"]["2"]["inputs"])
@@ -94,6 +95,7 @@ class PromptMapperTest(unittest.TestCase):
         }
         payload = map_contract_payload_to_prompt(workflow, _contract(), {"prompt": "hello"}, job_id="job-123")
         self.assertEqual(payload["prompt"]["2"]["inputs"]["ce_job_id"], "job-123")
+        self.assertIn("ce_state_db", payload["prompt"]["1"]["inputs"])
 
 
 if __name__ == "__main__":

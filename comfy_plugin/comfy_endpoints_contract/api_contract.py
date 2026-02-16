@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import mimetypes
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,12 @@ from typing import Any
 
 SCALAR_CONTRACT_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 MEDIA_TYPE_PATTERN = re.compile(r"^(image|video|audio|file)/[A-Za-z0-9][A-Za-z0-9.+-]*$")
+MEDIA_PREFIXES = ("image/", "video/", "audio/", "file/")
+
+
+def _is_media_contract_type(type_name: str) -> bool:
+    normalized = type_name.strip().lower()
+    return normalized.startswith(MEDIA_PREFIXES)
 
 
 class ApiInputNode:
@@ -21,6 +28,9 @@ class ApiInputNode:
                 "type": ("STRING", {"default": "string"}),
                 "required": ("BOOLEAN", {"default": True}),
                 "value": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "ce_state_db": ("STRING", {"default": ""}),
             }
         }
 
@@ -29,9 +39,39 @@ class ApiInputNode:
     FUNCTION = "execute"
     CATEGORY = "ComfyEndpoints"
 
-    def execute(self, name: str, type: str, required: bool, value: str) -> tuple[str]:
+    @staticmethod
+    def _resolve_media_file_id(*, name: str, type: str, value: str, state_db_path: str) -> str:
+        from comfy_endpoints.gateway.job_store import JobStore
+
+        normalized_type = type.strip().lower()
+        if not _is_media_contract_type(normalized_type):
+            return value
+
+        trimmed_value = value.strip()
+        if not trimmed_value.startswith("fid_"):
+            return value
+
+        if not state_db_path:
+            raise ValueError("Missing ce_state_db for media input")
+
+        store = JobStore(Path(state_db_path))
+        record = store.get_file(trimmed_value)
+        if not record:
+            raise ValueError(f"Unknown media file_id for input '{name}': {trimmed_value}")
+        if not record.storage_path.exists():
+            raise ValueError(f"Media file_id has missing storage for input '{name}': {trimmed_value}")
+        return str(record.storage_path)
+
+    def execute(self, name: str, type: str, required: bool, value: str, ce_state_db: str = "") -> tuple[str]:
         _ = (name, type, required)
-        return (value,)
+        state_db_path = ce_state_db.strip() or os.getenv("COMFY_ENDPOINTS_STATE_DB", "").strip()
+        resolved_value = self._resolve_media_file_id(
+            name=name,
+            type=type,
+            value=value,
+            state_db_path=state_db_path,
+        )
+        return (resolved_value,)
 
 
 class ApiOutputNode:
@@ -141,6 +181,53 @@ class ApiOutputNode:
         )
         return record.file_id
 
+    @staticmethod
+    def _create_generated_binary_file_id(
+        *,
+        output_name: str,
+        media_type: str,
+        media_value: object,
+        state_db_path: str,
+    ) -> str:
+        from comfy_endpoints.gateway.job_store import JobStore
+
+        if not state_db_path:
+            raise ValueError("Missing ce_state_db for media output")
+
+        payload_bytes: bytes
+        suffix = ""
+        if isinstance(media_value, (bytes, bytearray)):
+            payload_bytes = bytes(media_value)
+        elif isinstance(media_value, str):
+            media_path = Path(media_value.strip())
+            if not media_path.exists() or not media_path.is_file():
+                raise ValueError(f"Missing media output file: {media_value}")
+            payload_bytes = media_path.read_bytes()
+            suffix = media_path.suffix
+        else:
+            raise ValueError(f"Unsupported media output payload type: {type(media_value)}")
+
+        if not payload_bytes:
+            raise ValueError("Media output payload is empty")
+
+        app_id = os.getenv("COMFY_ENDPOINTS_APP_ID", "").strip() or None
+        normalized_name = Path(output_name).name
+        if suffix:
+            original_name = f"{normalized_name}{suffix}" if not normalized_name.endswith(suffix) else normalized_name
+        else:
+            guessed_suffix = mimetypes.guess_extension(media_type) or ""
+            original_name = f"{normalized_name}{guessed_suffix}"
+
+        store = JobStore(Path(state_db_path))
+        record = store.create_file(
+            content=payload_bytes,
+            media_type=media_type,
+            source="generated",
+            app_id=app_id,
+            original_name=original_name,
+        )
+        return record.file_id
+
     def execute(
         self,
         name: str,
@@ -152,7 +239,7 @@ class ApiOutputNode:
         ce_state_db: str = "",
     ) -> tuple[str]:
         normalized_type = type.strip().lower()
-        media_output = normalized_type.startswith(("image/", "video/", "audio/", "file/"))
+        media_output = _is_media_contract_type(normalized_type)
         resolved_value = image if image is not None else value
         if media_output:
             if isinstance(value, str) and value.strip().startswith("fid_"):
@@ -166,7 +253,13 @@ class ApiOutputNode:
                     state_db_path=state_db_path,
                 )
             else:
-                resolved_value = str(value)
+                state_db_path = ce_state_db.strip() or os.getenv("COMFY_ENDPOINTS_STATE_DB", "").strip()
+                resolved_value = self._create_generated_binary_file_id(
+                    output_name=name,
+                    media_type=normalized_type,
+                    media_value=value,
+                    state_db_path=state_db_path,
+                )
 
         artifacts_dir = ce_artifacts_dir.strip() or os.getenv(
             "COMFY_ENDPOINTS_ARTIFACTS_DIR", "/opt/comfy_endpoints/runtime/artifacts"

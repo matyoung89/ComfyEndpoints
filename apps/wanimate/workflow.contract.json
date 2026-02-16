@@ -1,0 +1,25 @@
+{
+  "contract_id": "wanimate-contract",
+  "version": "v1",
+  "inputs": [
+    {
+      "name": "reference_image",
+      "type": "image/png",
+      "required": true,
+      "node_id": "1"
+    },
+    {
+      "name": "driving_video",
+      "type": "video/mp4",
+      "required": true,
+      "node_id": "2"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "output_video",
+      "type": "video/mp4",
+      "node_id": "9"
+    }
+  ]
+}

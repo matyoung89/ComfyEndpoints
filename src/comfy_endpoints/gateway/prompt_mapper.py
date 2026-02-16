@@ -135,14 +135,15 @@ def map_contract_payload_to_prompt(
         if not isinstance(node, dict):
             continue
         class_type = str(node.get("class_type", "")).strip().lower()
-        if class_type != "apioutput":
+        if class_type not in {"apiinput", "apioutput"}:
             continue
         node_inputs = node.get("inputs")
         if not isinstance(node_inputs, dict):
             continue
-        node_inputs["ce_job_id"] = job_id or ""
-        node_inputs["ce_artifacts_dir"] = artifacts_dir
         node_inputs["ce_state_db"] = state_db_path
+        if class_type == "apioutput":
+            node_inputs["ce_job_id"] = job_id or ""
+            node_inputs["ce_artifacts_dir"] = artifacts_dir
 
     return {"prompt": prompt}
 

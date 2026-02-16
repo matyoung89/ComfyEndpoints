@@ -313,6 +313,14 @@ class ValidatorsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "compute_policy.min_vram_gb must be > 0"):
                 validate_deployable_spec(app_path)
 
+    def test_validate_wanimate_app_files(self) -> None:
+        app_path = Path(__file__).resolve().parents[2] / "apps" / "wanimate" / "app.json"
+        app_spec, contract = validate_deployable_spec(app_path)
+        self.assertEqual(app_spec.app_id, "wanimate")
+        self.assertEqual(contract.contract_id, "wanimate-contract")
+        self.assertEqual(len(contract.inputs), 2)
+        self.assertEqual(contract.outputs[0].name, "output_video")
+
 
 if __name__ == "__main__":
     unittest.main()

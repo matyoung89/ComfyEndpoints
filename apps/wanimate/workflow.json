@@ -1,0 +1,50 @@
+{
+  "prompt": {
+    "1": {
+      "class_type": "ApiInput",
+      "inputs": {
+        "name": "reference_image",
+        "type": "image/png",
+        "required": true,
+        "value": ""
+      }
+    },
+    "2": {
+      "class_type": "ApiInput",
+      "inputs": {
+        "name": "driving_video",
+        "type": "video/mp4",
+        "required": true,
+        "value": ""
+      }
+    },
+    "3": {
+      "class_type": "Wan22Animate",
+      "inputs": {
+        "reference_image_path": [
+          "1",
+          0
+        ],
+        "driving_video_path": [
+          "2",
+          0
+        ],
+        "motion_strength": 1.0,
+        "seed": 1000001,
+        "steps": 30,
+        "fps": 24
+      }
+    },
+    "9": {
+      "class_type": "ApiOutput",
+      "inputs": {
+        "name": "output_video",
+        "type": "video/mp4",
+        "value": [
+          "3",
+          0
+        ]
+      }
+    }
+  }
+}
