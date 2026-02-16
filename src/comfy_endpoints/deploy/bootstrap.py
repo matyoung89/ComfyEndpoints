@@ -81,6 +81,7 @@ def wait_for_comfy_ready(comfy_url: str, timeout_seconds: int = 180) -> None:
 MISSING_MODEL_PATTERN = re.compile(
     r"Value not in list:\s*(?P<input_name>[A-Za-z0-9_]+)\s*:\s*'(?P<filename>[^']+)'",
 )
+MISSING_NODE_PATTERN = re.compile(r"Node '(?P<class_type>[^']+)' not found")
 
 MODEL_DIR_BY_INPUT_NAME = {
     "ckpt_name": "checkpoints",
@@ -124,6 +125,11 @@ class MissingModelRequirement:
     filename: str
 
 
+@dataclass(slots=True)
+class MissingNodeRequirement:
+    class_type: str
+
+
 def _missing_models_from_preflight_error(exc: ComfyClientError) -> list[MissingModelRequirement]:
     text_candidates: list[str] = []
     if exc.response_text:
@@ -147,6 +153,28 @@ def _missing_models_from_preflight_error(exc: ComfyClientError) -> list[MissingM
                 continue
             seen.add(key)
             parsed.append(MissingModelRequirement(input_name=input_name, filename=filename))
+    return parsed
+
+
+def _missing_nodes_from_preflight_error(exc: ComfyClientError) -> list[MissingNodeRequirement]:
+    text_candidates: list[str] = []
+    if exc.response_text:
+        text_candidates.append(exc.response_text)
+    if isinstance(exc.response_json, dict):
+        for key in ("details", "message"):
+            value = exc.response_json.get(key)
+            if isinstance(value, str):
+                text_candidates.append(value)
+
+    parsed: list[MissingNodeRequirement] = []
+    seen: set[str] = set()
+    for blob in text_candidates:
+        for match in MISSING_NODE_PATTERN.finditer(blob):
+            class_type = match.group("class_type").strip()
+            if not class_type or class_type in seen:
+                continue
+            seen.add(class_type)
+            parsed.append(MissingNodeRequirement(class_type=class_type))
     return parsed
 
 
@@ -251,6 +279,36 @@ def _known_model_requirements_from_prompt(prompt_payload: dict) -> list[MissingM
     return parsed
 
 
+def _missing_nodes_from_object_info(
+    prompt_payload: dict,
+    object_info_payload: dict,
+) -> list[MissingNodeRequirement]:
+    prompt = prompt_payload.get("prompt")
+    if not isinstance(prompt, dict):
+        return []
+
+    known_node_classes = {key for key in object_info_payload.keys() if isinstance(key, str) and key}
+    if not known_node_classes:
+        return []
+
+    parsed: list[MissingNodeRequirement] = []
+    seen: set[str] = set()
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str) or not class_type:
+            continue
+        if class_type in known_node_classes:
+            continue
+        if class_type in seen:
+            continue
+        seen.add(class_type)
+        parsed.append(MissingNodeRequirement(class_type=class_type))
+
+    return parsed
+
+
 def _iter_model_entries(payload: object) -> list[dict]:
     entries: list[dict] = []
 
@@ -280,6 +338,249 @@ def _iter_model_entries(payload: object) -> list[dict]:
     for item in entries:
         unique[(item["filename"], item["url"])] = item
     return list(unique.values())
+
+
+def _is_url_like(value: str) -> bool:
+    lower = value.lower()
+    return lower.startswith("http://") or lower.startswith("https://") or lower.startswith("git@")
+
+
+def _normalize_repo_url(url: str) -> str:
+    value = url.strip()
+    if not value:
+        return ""
+    if value.startswith("git@github.com:"):
+        owner_repo = value.removeprefix("git@github.com:")
+        if owner_repo.endswith(".git"):
+            owner_repo = owner_repo[:-4]
+        return f"https://github.com/{owner_repo.strip('/')}"
+
+    parsed = urllib.parse.urlparse(value)
+    if parsed.netloc in {"raw.githubusercontent.com", "github.com"}:
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if parsed.netloc == "raw.githubusercontent.com":
+            if len(segments) >= 2:
+                return f"https://github.com/{segments[0]}/{segments[1]}"
+        if parsed.netloc == "github.com":
+            if len(segments) >= 2:
+                repo_url = f"https://github.com/{segments[0]}/{segments[1]}"
+                if repo_url.endswith(".git"):
+                    return repo_url[:-4]
+                return repo_url
+    return value.removesuffix(".git")
+
+
+def _collect_repo_urls(value: object) -> set[str]:
+    urls: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, str):
+            if _is_url_like(node):
+                normalized = _normalize_repo_url(node)
+                if normalized:
+                    urls.add(normalized)
+            return
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if isinstance(key, str) and _is_url_like(key):
+                    normalized = _normalize_repo_url(key)
+                    if normalized:
+                        urls.add(normalized)
+                walk(item)
+            return
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return urls
+
+
+def _find_repo_urls_for_node_class(class_type: str, payload: object) -> set[str]:
+    matches: set[str] = set()
+
+    def walk(node: object) -> bool:
+        if isinstance(node, str):
+            return node == class_type
+        if isinstance(node, dict):
+            local_hit = False
+            local_urls: set[str] = set()
+            for key, value in node.items():
+                key_hit = isinstance(key, str) and key == class_type
+                value_hit = walk(value)
+                if key_hit or value_hit:
+                    local_hit = True
+                    if isinstance(key, str) and _is_url_like(key):
+                        normalized = _normalize_repo_url(key)
+                        if normalized:
+                            local_urls.add(normalized)
+                    local_urls.update(_collect_repo_urls(value))
+            if local_hit:
+                if local_urls:
+                    matches.update(local_urls)
+                else:
+                    matches.update(_collect_repo_urls(node))
+            return local_hit
+        if isinstance(node, list):
+            local_hit = False
+            local_urls: set[str] = set()
+            for value in node:
+                value_hit = walk(value)
+                if value_hit:
+                    local_hit = True
+                    local_urls.update(_collect_repo_urls(value))
+            if local_hit:
+                if local_urls:
+                    matches.update(local_urls)
+                else:
+                    matches.update(_collect_repo_urls(node))
+            return local_hit
+        return False
+
+    walk(payload)
+    return matches
+
+
+def _find_package_ids_for_node_class(class_type: str, payload: object) -> set[str]:
+    package_ids: set[str] = set()
+
+    def walk(node: object) -> bool:
+        if isinstance(node, str):
+            return node == class_type
+        if isinstance(node, dict):
+            local_hit = False
+            for key, value in node.items():
+                key_hit = isinstance(key, str) and key == class_type
+                value_hit = walk(value)
+                if key_hit or value_hit:
+                    local_hit = True
+                    if isinstance(key, str) and key != class_type and not _is_url_like(key):
+                        package_ids.add(key)
+                    if key_hit and isinstance(value, str) and value != class_type and not _is_url_like(value):
+                        package_ids.add(value)
+            return local_hit
+        if isinstance(node, list):
+            local_hit = False
+            for value in node:
+                if walk(value):
+                    local_hit = True
+            return local_hit
+        return False
+
+    walk(payload)
+    return package_ids
+
+
+def _find_repo_urls_for_package_ids(package_ids: set[str], payload: object) -> set[str]:
+    if not package_ids:
+        return set()
+    matches: set[str] = set()
+
+    def walk(node: object) -> bool:
+        if isinstance(node, str):
+            return node in package_ids
+        if isinstance(node, dict):
+            direct_hit = False
+            for key, value in node.items():
+                if isinstance(key, str) and key in package_ids:
+                    direct_hit = True
+                if isinstance(value, str) and value in package_ids:
+                    direct_hit = True
+            child_hit = False
+            for value in node.values():
+                if walk(value):
+                    child_hit = True
+            if direct_hit:
+                matches.update(_collect_repo_urls(node))
+            return direct_hit or child_hit
+        if isinstance(node, list):
+            for value in node:
+                if walk(value):
+                    return True
+            return False
+        return False
+
+    walk(payload)
+    return matches
+
+
+def _fetch_manager_default_node_mappings() -> object:
+    url = "https://raw.githubusercontent.com/Comfy-Org/ComfyUI-Manager/main/extension-node-map.json"
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=60) as response:
+        body = response.read().decode("utf-8")
+    return json.loads(body or "{}")
+
+
+def _install_missing_custom_nodes(
+    comfy_client: ComfyClient,
+    requirements: list[MissingNodeRequirement],
+) -> int:
+    if not requirements:
+        return 0
+
+    mapping_payload: object = {}
+    try:
+        mapping_payload = comfy_client.get_custom_node_mappings()
+    except ComfyClientError as exc:
+        print(f"[bootstrap] manager custom node mappings unavailable: {exc}", file=sys.stderr)
+
+    list_payload: object = {}
+    try:
+        list_payload = comfy_client.get_custom_node_list()
+    except ComfyClientError as exc:
+        print(f"[bootstrap] manager custom node list unavailable: {exc}", file=sys.stderr)
+
+    if not mapping_payload:
+        try:
+            mapping_payload = _fetch_manager_default_node_mappings()
+            print("[bootstrap] using fallback extension-node-map catalog", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bootstrap] fallback node catalog unavailable: {exc}", file=sys.stderr)
+            mapping_payload = {}
+
+    installed_count = 0
+    attempted_repo_urls: set[str] = set()
+    for requirement in requirements:
+        candidate_urls = _find_repo_urls_for_node_class(requirement.class_type, mapping_payload)
+        candidate_urls.update(_find_repo_urls_for_node_class(requirement.class_type, list_payload))
+        if not candidate_urls:
+            package_ids = _find_package_ids_for_node_class(requirement.class_type, mapping_payload)
+            candidate_urls.update(_find_repo_urls_for_package_ids(package_ids, list_payload))
+        if not candidate_urls:
+            print(
+                f"[bootstrap] no catalog match for required node class_type={requirement.class_type}",
+                file=sys.stderr,
+            )
+            continue
+
+        installed = False
+        for repo_url in sorted(candidate_urls):
+            if repo_url in attempted_repo_urls:
+                continue
+            attempted_repo_urls.add(repo_url)
+            try:
+                comfy_client.install_custom_node_by_git_url(repo_url)
+                installed_count += 1
+                installed = True
+                print(
+                    f"[bootstrap] installed custom node class_type={requirement.class_type} repo={repo_url}",
+                    file=sys.stderr,
+                )
+                break
+            except ComfyClientError as exc:
+                print(
+                    f"[bootstrap] failed custom node install repo={repo_url}: {exc}",
+                    file=sys.stderr,
+                )
+
+        if not installed:
+            print(
+                f"[bootstrap] unable to install required node class_type={requirement.class_type}",
+                file=sys.stderr,
+            )
+
+    return installed_count
 
 
 def _target_model_dir(requirement: MissingModelRequirement, external_type: str) -> str:
@@ -499,7 +800,10 @@ def run_bootstrap(
     if app_id:
         gateway_command = f"{gateway_command} --app-id {shlex.quote(app_id)}"
 
-    comfy_process = subprocess.Popen(shlex.split(comfy_command))
+    def start_comfy_process() -> subprocess.Popen[bytes]:
+        return subprocess.Popen(shlex.split(comfy_command))
+
+    comfy_process = start_comfy_process()
     gateway_process = None
 
     def shutdown(_sig: int, _frame: object) -> None:
@@ -525,6 +829,50 @@ def run_bootstrap(
                 )
                 break
             except ComfyClientError as exc:
+                missing_nodes = _missing_nodes_from_preflight_error(exc)
+                if not missing_nodes:
+                    if object_info_payload is None:
+                        try:
+                            object_info_payload = comfy_client.get_object_info()
+                        except ComfyClientError:
+                            object_info_payload = {}
+                    missing_nodes = _missing_nodes_from_object_info(
+                        prompt_payload=preflight_payload,
+                        object_info_payload=object_info_payload,
+                    )
+
+                if missing_nodes:
+                    print(
+                        "[bootstrap] detected missing nodes: "
+                        + ", ".join(item.class_type for item in missing_nodes),
+                        file=sys.stderr,
+                    )
+                    if attempt == max_preflight_attempts:
+                        raise
+                    installed_nodes = _install_missing_custom_nodes(
+                        comfy_client=comfy_client,
+                        requirements=missing_nodes,
+                    )
+                    if installed_nodes <= 0:
+                        raise
+                    if comfy_process.poll() is None:
+                        comfy_process.terminate()
+                        try:
+                            comfy_process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            comfy_process.kill()
+                    comfy_process = start_comfy_process()
+                    wait_for_comfy_ready("http://127.0.0.1:8188")
+                    comfy_client = ComfyClient("http://127.0.0.1:8188")
+                    object_info_payload = None
+                    print(
+                        f"[bootstrap] preflight retry attempt={attempt + 1} after installing "
+                        f"{installed_nodes} custom node(s)",
+                        file=sys.stderr,
+                    )
+                    time.sleep(2)
+                    continue
+
                 missing_models = _missing_models_from_preflight_error(exc)
                 if not missing_models:
                     if object_info_payload is None:

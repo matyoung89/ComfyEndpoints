@@ -6,11 +6,18 @@ from pathlib import Path
 from unittest import mock
 
 from comfy_endpoints.deploy.bootstrap import (
+    MissingNodeRequirement,
     MissingModelRequirement,
     _ensure_model_roots_on_cache,
     _fetch_manager_default_model_list,
+    _find_package_ids_for_node_class,
+    _find_repo_urls_for_package_ids,
+    _find_repo_urls_for_node_class,
+    _install_missing_custom_nodes,
     _install_missing_models,
     _iter_model_entries,
+    _missing_nodes_from_object_info,
+    _missing_nodes_from_preflight_error,
     _known_model_requirements_from_prompt,
     _missing_models_from_object_info,
     _missing_models_from_preflight_error,
@@ -208,6 +215,79 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
                 MissingModelRequirement(input_name="vae_name", filename="ae.safetensors"),
             ],
         )
+
+    def test_missing_nodes_parse_from_error_text(self) -> None:
+        exc = ComfyClientError(
+            "error",
+            status_code=400,
+            response_text="invalid prompt: Node 'Wan22Animate' not found. The custom node may not be installed.",
+        )
+        parsed = _missing_nodes_from_preflight_error(exc)
+        self.assertEqual(parsed, [MissingNodeRequirement(class_type="Wan22Animate")])
+
+    def test_missing_nodes_parse_from_object_info(self) -> None:
+        prompt_payload = {
+            "prompt": {
+                "1": {"class_type": "ApiInput", "inputs": {}},
+                "2": {"class_type": "Wan22Animate", "inputs": {}},
+                "3": {"class_type": "ApiOutput", "inputs": {}},
+            }
+        }
+        object_info_payload = {
+            "ApiInput": {"input": {"required": {}}},
+            "ApiOutput": {"input": {"required": {}}},
+        }
+        parsed = _missing_nodes_from_object_info(prompt_payload, object_info_payload)
+        self.assertEqual(parsed, [MissingNodeRequirement(class_type="Wan22Animate")])
+
+    def test_find_repo_urls_for_node_class_from_mapping(self) -> None:
+        payload = {
+            "https://github.com/example/custom-wan-node": [["Wan22Animate"]],
+            "https://github.com/example/other": [["OtherNode"]],
+        }
+        urls = _find_repo_urls_for_node_class("Wan22Animate", payload)
+        self.assertEqual(urls, {"https://github.com/example/custom-wan-node"})
+
+    def test_install_missing_custom_nodes_installs_by_git_url(self) -> None:
+        class FakeComfyClient:
+            def __init__(self):
+                self.installs = []
+
+            def get_custom_node_mappings(self):
+                return {
+                    "https://github.com/example/custom-wan-node": [["Wan22Animate"]],
+                }
+
+            def get_custom_node_list(self):
+                return {}
+
+            def install_custom_node_by_git_url(self, git_url: str):
+                self.installs.append(git_url)
+                return "ok"
+
+        client = FakeComfyClient()
+        count = _install_missing_custom_nodes(
+            comfy_client=client,
+            requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(client.installs, ["https://github.com/example/custom-wan-node"])
+
+    def test_package_id_mapping_resolves_repo_urls(self) -> None:
+        mappings_payload = {
+            "example-wan-pack": ["Wan22Animate"],
+            "other-pack": ["OtherNode"],
+        }
+        node_list_payload = {
+            "node_packs": [
+                {"id": "example-wan-pack", "files": ["https://github.com/example/custom-wan-node"]},
+                {"id": "other-pack", "files": ["https://github.com/example/other-node"]},
+            ]
+        }
+        package_ids = _find_package_ids_for_node_class("Wan22Animate", mappings_payload)
+        urls = _find_repo_urls_for_package_ids(package_ids, node_list_payload)
+        self.assertEqual(package_ids, {"example-wan-pack"})
+        self.assertEqual(urls, {"https://github.com/example/custom-wan-node"})
 
 
 if __name__ == "__main__":

@@ -25,12 +25,21 @@ class ComfyClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
 
-    def _request_json(self, path: str, method: str = "GET", payload: dict | None = None) -> dict:
+    def _request_json(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request_headers = {"content-type": "application/json", "accept": "application/json"}
+        if headers:
+            request_headers.update(headers)
         request = urllib.request.Request(
             f"{self.base_url}{path}",
             data=data,
-            headers={"content-type": "application/json", "accept": "application/json"},
+            headers=request_headers,
             method=method,
         )
 
@@ -65,6 +74,45 @@ class ComfyClient:
             raise ComfyClientError(f"Comfy {method} {path} returned non-object JSON")
 
         return payload
+
+    def _request_text(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> str:
+        data = payload.encode("utf-8") if payload is not None else None
+        request_headers = {"accept": "*/*"}
+        if headers:
+            request_headers.update(headers)
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers=request_headers,
+            method=method,
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            response_text = exc.read().decode("utf-8", errors="replace")
+            response_json = None
+            try:
+                parsed = json.loads(response_text or "{}")
+                if isinstance(parsed, dict):
+                    response_json = parsed
+            except json.JSONDecodeError:
+                response_json = None
+            raise ComfyClientError(
+                f"Comfy {method} {path} HTTP error: {exc.code}",
+                status_code=exc.code,
+                response_text=response_text,
+                response_json=response_json,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ComfyClientError(f"Comfy {method} {path} connection error: {exc.reason}") from exc
 
     def queue_prompt(self, prompt_payload: dict) -> str:
         body = self._request_json("/prompt", method="POST", payload=prompt_payload)
@@ -130,3 +178,61 @@ class ComfyClient:
         if not isinstance(payload, dict):
             raise ComfyClientError("Comfy object_info returned non-object JSON")
         return payload
+
+    def get_custom_node_mappings(self) -> object:
+        query = urllib.parse.urlencode({"mode": "default"})
+        request = urllib.request.Request(
+            f"{self.base_url}/customnode/getmappings?{query}",
+            headers={"accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            response_text = exc.read().decode("utf-8", errors="replace")
+            raise ComfyClientError(
+                f"Comfy manager custom node mappings HTTP error: {exc.code}",
+                status_code=exc.code,
+                response_text=response_text,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ComfyClientError(f"Comfy manager custom node mappings connection error: {exc.reason}") from exc
+
+        try:
+            return json.loads(body or "[]")
+        except json.JSONDecodeError as exc:
+            raise ComfyClientError("Comfy manager custom node mappings returned invalid JSON") from exc
+
+    def get_custom_node_list(self) -> object:
+        query = urllib.parse.urlencode({"mode": "default", "skip_update": "true"})
+        request = urllib.request.Request(
+            f"{self.base_url}/customnode/getlist?{query}",
+            headers={"accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            response_text = exc.read().decode("utf-8", errors="replace")
+            raise ComfyClientError(
+                f"Comfy manager custom node list HTTP error: {exc.code}",
+                status_code=exc.code,
+                response_text=response_text,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ComfyClientError(f"Comfy manager custom node list connection error: {exc.reason}") from exc
+
+        try:
+            return json.loads(body or "[]")
+        except json.JSONDecodeError as exc:
+            raise ComfyClientError("Comfy manager custom node list returned invalid JSON") from exc
+
+    def install_custom_node_by_git_url(self, git_url: str) -> str:
+        return self._request_text(
+            "/customnode/install/git_url",
+            method="POST",
+            payload=git_url,
+            headers={"content-type": "text/plain", "Security-Level": "weak"},
+        )
