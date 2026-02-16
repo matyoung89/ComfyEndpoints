@@ -42,7 +42,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     workflow_file = app_dir / "workflow.json"
     contract_file = app_dir / "workflow.contract.json"
-    app_spec_file = app_dir / "app.yaml"
+    app_spec_file = app_dir / "app.json"
 
     if not workflow_file.exists():
         workflow_file.write_text(
@@ -97,41 +97,54 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     if not app_spec_file.exists():
         app_spec_file.write_text(
-            f"""app_id: {app_dir.name}
-version: v1
-workflow_path: ./workflow.json
-provider: runpod
-gpu_profile: A10G
-regions:
-  - US
-env:
-  COMFY_HEADLESS: "1"
-  COMFY_ENDPOINTS_API_KEY: "demo-change-me"
-endpoint:
-  name: run
-  mode: async
-  auth_mode: api_key
-  timeout_seconds: 300
-  max_payload_mb: 10
-cache_policy:
-  watch_paths:
-    - /opt/comfy/models
-  min_file_size_mb: 100
-  symlink_targets:
-    - /opt/comfy/models
-build:
-  comfy_version: 0.3.26
-  image_repository: ghcr.io/matyoung89/comfy-endpoints-golden
-  base_image_repository: ghcr.io/matyoung89/comfy-endpoints-comfybase
-  base_dockerfile_path: docker/Dockerfile.comfybase
-  dockerfile_path: docker/Dockerfile.golden
-  build_context: .
-  base_build_context: .
-  container_registry_auth_id: ""
-  plugins:
-    - repo: https://github.com/comfyanonymous/ComfyUI
-      ref: master
-""",
+            json.dumps(
+                {
+                    "app_id": app_dir.name,
+                    "version": "v1",
+                    "workflow_path": "./workflow.json",
+                    "provider": "runpod",
+                    "gpu_profile": "A10G",
+                    "regions": ["US"],
+                    "env": {
+                        "COMFY_HEADLESS": "1",
+                        "COMFY_ENDPOINTS_API_KEY": "demo-change-me",
+                    },
+                    "endpoint": {
+                        "name": "run",
+                        "mode": "async",
+                        "auth_mode": "api_key",
+                        "timeout_seconds": 300,
+                        "max_payload_mb": 10,
+                    },
+                    "cache_policy": {
+                        "watch_paths": ["/opt/comfy/models"],
+                        "min_file_size_mb": 100,
+                        "symlink_targets": ["/opt/comfy/models"],
+                    },
+                    "compute_policy": {
+                        "min_vram_gb": 24,
+                        "min_ram_per_gpu_gb": 64,
+                        "gpu_count": 1,
+                    },
+                    "build": {
+                        "comfy_version": "0.3.26",
+                        "image_repository": "ghcr.io/matyoung89/comfy-endpoints-golden",
+                        "base_image_repository": "ghcr.io/matyoung89/comfy-endpoints-comfybase",
+                        "base_dockerfile_path": "docker/Dockerfile.comfybase",
+                        "dockerfile_path": "docker/Dockerfile.golden",
+                        "build_context": ".",
+                        "base_build_context": ".",
+                        "container_registry_auth_id": "",
+                        "plugins": [
+                            {
+                                "repo": "https://github.com/comfyanonymous/ComfyUI",
+                                "ref": "master",
+                            }
+                        ],
+                    },
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
 

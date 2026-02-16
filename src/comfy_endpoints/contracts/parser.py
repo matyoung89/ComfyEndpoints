@@ -16,17 +16,4 @@ def load_structured_file(path: Path) -> dict[str, Any]:
     if suffix == ".json":
         return json.loads(content)
 
-    if suffix in {".yaml", ".yml"}:
-        try:
-            import yaml  # type: ignore
-        except ImportError as exc:
-            raise ContractError(
-                "YAML support requires PyYAML. Install with `pip install pyyaml` or use JSON."
-            ) from exc
-
-        data = yaml.safe_load(content)
-        if not isinstance(data, dict):
-            raise ContractError(f"Expected mapping document in {path}")
-        return data
-
-    raise ContractError(f"Unsupported file extension for {path}")
+    raise ContractError(f"Unsupported file extension for {path}. Only .json is supported.")

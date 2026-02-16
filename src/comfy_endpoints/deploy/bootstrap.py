@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -106,6 +107,14 @@ MODEL_DIR_BY_TYPE = {
     "loras": "loras",
     "controlnet": "controlnet",
     "control_net": "controlnet",
+}
+MODEL_SUBDIRS = {
+    "checkpoints",
+    "diffusion_models",
+    "text_encoders",
+    "vae",
+    "loras",
+    "controlnet",
 }
 
 
@@ -315,7 +324,7 @@ def _fetch_manager_default_model_list() -> object:
 def _install_missing_models(
     comfy_client: ComfyClient,
     requirements: list[MissingModelRequirement],
-    comfy_root: Path,
+    cache_models_root: Path,
 ) -> int:
     if not requirements:
         return 0
@@ -369,7 +378,7 @@ def _install_missing_models(
             continue
 
         model_dir = _target_model_dir(requirement, selected.get("type", ""))
-        target_path = comfy_root / "models" / model_dir / requirement.filename
+        target_path = cache_models_root / model_dir / requirement.filename
         if target_path.exists():
             continue
 
@@ -401,6 +410,44 @@ def _install_missing_models(
     return installed_count
 
 
+def _move_dir_contents(source_dir: Path, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for entry in source_dir.iterdir():
+        target_path = target_dir / entry.name
+        if target_path.exists():
+            continue
+        shutil.move(str(entry), str(target_path))
+
+
+def _ensure_model_roots_on_cache(
+    comfy_models_root: Path,
+    cache_models_root: Path,
+) -> None:
+    cache_models_root.mkdir(parents=True, exist_ok=True)
+    comfy_models_root.mkdir(parents=True, exist_ok=True)
+    for model_subdir in sorted(MODEL_SUBDIRS):
+        cache_target_dir = cache_models_root / model_subdir
+        cache_target_dir.mkdir(parents=True, exist_ok=True)
+        comfy_dir = comfy_models_root / model_subdir
+
+        if comfy_dir.is_symlink():
+            symlink_target = comfy_dir.resolve(strict=False)
+            if symlink_target == cache_target_dir:
+                continue
+            comfy_dir.unlink()
+            comfy_dir.symlink_to(cache_target_dir, target_is_directory=True)
+            continue
+
+        if comfy_dir.exists():
+            if comfy_dir.is_dir():
+                _move_dir_contents(comfy_dir, cache_target_dir)
+                shutil.rmtree(comfy_dir)
+            else:
+                raise RuntimeError(f"Model path is not a directory: {comfy_dir}")
+
+        comfy_dir.symlink_to(cache_target_dir, target_is_directory=True)
+
+
 def run_bootstrap(
     cache_root: Path,
     watch_paths: list[Path],
@@ -416,6 +463,17 @@ def run_bootstrap(
 
     contract = parse_workflow_contract(contract_path)
     workflow_payload = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+    cache_models_root = Path(
+        os.getenv("COMFY_ENDPOINTS_CACHE_MODEL_ROOT", str(cache_root / "models")).strip()
+    )
+    comfy_models_root = Path(
+        os.getenv("COMFY_ENDPOINTS_COMFY_MODELS_ROOT", "/opt/comfy/models").strip()
+    )
+    _ensure_model_roots_on_cache(
+        comfy_models_root=comfy_models_root,
+        cache_models_root=cache_models_root,
+    )
 
     manager = CacheManager(
         cache_root=cache_root,
@@ -499,7 +557,7 @@ def run_bootstrap(
                 installed = _install_missing_models(
                     comfy_client=comfy_client,
                     requirements=missing_models,
-                    comfy_root=Path("/opt/comfy"),
+                    cache_models_root=cache_models_root,
                 )
                 if installed <= 0:
                     raise

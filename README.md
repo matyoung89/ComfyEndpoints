@@ -9,8 +9,29 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 comfy-endpoints init /Users/mat/Projects/ComfyEndpoints/apps/demo
-comfy-endpoints validate /Users/mat/Projects/ComfyEndpoints/apps/demo/app.yaml
-comfy-endpoints deploy /Users/mat/Projects/ComfyEndpoints/apps/demo/app.yaml
+comfy-endpoints validate /Users/mat/Projects/ComfyEndpoints/apps/demo/app.json
+comfy-endpoints deploy /Users/mat/Projects/ComfyEndpoints/apps/demo/app.json
+```
+
+## Friendly CLI Wrapper (`cend`)
+
+You can use the repo wrapper script instead of manually sourcing env and setting `PYTHONPATH`:
+
+```bash
+./cend --help
+./cend validate /Users/mat/Projects/ComfyEndpoints/apps/demo/app.json
+./cend deploy /Users/mat/Projects/ComfyEndpoints/apps/demo/app.json
+```
+
+What it does:
+- auto-loads `.env.local` (and `.env` if present),
+- sets `PYTHONPATH` to include `src`,
+- runs `python -m comfy_endpoints.cli.main ...`.
+
+Optional shell shortcut:
+
+```bash
+alias cend="/Users/mat/Projects/ComfyEndpoints/cend"
 ```
 
 ## Commands
@@ -39,6 +60,11 @@ RunPod provider now performs concrete deploy operations:
 3. Patches pod image/env/ports for the resolved golden image.
 4. Resumes pod and polls desired status.
 5. Resolves external endpoint from `podHostId` when available.
+
+Model cache behavior:
+- Missing models/resources are downloaded into pod volume storage under `/cache/models`.
+- Comfy model directories under `/opt/comfy/models/*` are symlinked to `/cache/models/*` during bootstrap.
+- This avoids filling the container writable layer (`containerDiskInGb`) with large model files.
 
 If your image is private, set these in app spec `build`:
 - `image_ref`: full container image ref
@@ -73,6 +99,14 @@ Build spec fields now support split base/golden images:
 - `build.base_image_repository`
 - `build.base_dockerfile_path`
 - `build.base_build_context`
+
+Optional app compute constraints:
+- `compute_policy.min_vram_gb`: minimum GPU VRAM in GiB for pod selection.
+- `compute_policy.min_ram_per_gpu_gb`: minimum host RAM per GPU in GiB.
+- `compute_policy.gpu_count`: GPU count (default `1`).
+
+Constraint behavior:
+- Constraints are enforced fail-closed: if no matching GPU types are available, deployment fails with an actionable error.
 
 ## RunPod API Key Storage (Safe)
 

@@ -183,7 +183,13 @@ class DeploymentServiceTest(unittest.TestCase):
                 "/opt/comfy_endpoints/runtime/workflow.json",
             )
             self.assertIn("COMFY_ENDPOINTS_WORKFLOW_JSON", fake_provider.last_env)
+            self.assertEqual(fake_provider.last_env.get("COMFY_ENDPOINTS_CACHE_ROOT"), "/cache")
+            self.assertEqual(fake_provider.last_env.get("COMFY_ENDPOINTS_CACHE_MODEL_ROOT"), "/cache/models")
+            self.assertEqual(fake_provider.last_env.get("COMFY_ENDPOINTS_WATCH_PATHS"), "/tmp/models")
+            self.assertEqual(fake_provider.last_env.get("COMFY_ENDPOINTS_MIN_FILE_SIZE_MB"), "100")
             self.assertIn("pod_logs_tail", record.metadata)
+            self.assertEqual(record.metadata.get("cache_mount_path"), "/cache")
+            self.assertEqual(record.metadata.get("cache_model_root"), "/cache/models")
 
     def test_retries_on_outbid_until_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -8,6 +8,7 @@ from comfy_endpoints.models import (
     AuthMode,
     BuildSpec,
     CachePolicy,
+    ComputePolicy,
     DeploymentState,
     EndpointSpec,
     ProviderName,
@@ -70,6 +71,37 @@ class RunpodProviderApiTest(unittest.TestCase):
         payload = mocked_rest.call_args.args[2]
         self.assertEqual(payload["containerRegistryAuthId"], "reg-auth-1")
         self.assertEqual(payload["imageName"], "ghcr.io/private/repo:tag")
+
+    def test_create_deployment_applies_min_ram_per_gpu_when_configured(self) -> None:
+        provider = RunpodProvider()
+        app_spec = _app_spec()
+        app_spec.compute_policy = ComputePolicy(min_ram_per_gpu_gb=64, gpu_count=1)
+        with mock.patch.object(provider, "_rest_request", return_value={"id": "pod-1"}) as mocked_rest:
+            provider.create_deployment(app_spec)
+        payload = mocked_rest.call_args.args[2]
+        self.assertEqual(payload["minRAMPerGPU"], 64)
+
+    def test_create_deployment_applies_gpu_type_ids_for_min_vram(self) -> None:
+        provider = RunpodProvider()
+        app_spec = _app_spec()
+        app_spec.compute_policy = ComputePolicy(min_vram_gb=24, gpu_count=1)
+        with mock.patch.object(provider, "_gpu_type_ids_with_min_vram", return_value=["gpu-1", "gpu-2"]):
+            with mock.patch.object(provider, "_rest_request", return_value={"id": "pod-1"}) as mocked_rest:
+                provider.create_deployment(app_spec)
+        payload = mocked_rest.call_args.args[2]
+        self.assertEqual(payload["gpuTypeIds"], ["gpu-1", "gpu-2"])
+
+    def test_create_deployment_fails_when_no_gpu_type_meets_min_vram(self) -> None:
+        provider = RunpodProvider()
+        app_spec = _app_spec()
+        app_spec.compute_policy = ComputePolicy(min_vram_gb=80, gpu_count=1)
+        with mock.patch.object(
+            provider,
+            "_gpu_type_ids_with_min_vram",
+            side_effect=RuntimeError("No RunPod GPU types satisfy min_vram_gb=80"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "min_vram_gb=80"):
+                provider.create_deployment(app_spec)
 
     def test_ensure_volume_patches_when_too_small(self) -> None:
         provider = RunpodProvider()

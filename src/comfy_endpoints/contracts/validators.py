@@ -11,6 +11,7 @@ from comfy_endpoints.models import (
     BuildPluginSpec,
     BuildSpec,
     CachePolicy,
+    ComputePolicy,
     ContractInputField,
     ContractOutputField,
     EndpointSpec,
@@ -47,6 +48,15 @@ def _expect_fields(mapping: dict, required: set[str], context: str) -> None:
         raise ValidationError(f"Missing required fields in {context}: {', '.join(missing)}")
 
 
+def _positive_int_or_none(raw: object, field_name: str) -> int | None:
+    if raw is None:
+        return None
+    value = int(raw)
+    if value <= 0:
+        raise ValidationError(f"{field_name} must be > 0")
+    return value
+
+
 def parse_app_spec(path: Path) -> AppSpecV1:
     raw = load_structured_file(path)
     _expect_fields(raw, REQUIRED_APP_FIELDS, "app spec")
@@ -68,6 +78,24 @@ def parse_app_spec(path: Path) -> AppSpecV1:
         BuildPluginSpec(repo=item["repo"], ref=item["ref"])
         for item in build_raw.get("plugins", [])
     ]
+    compute_raw = raw.get("compute_policy")
+    compute_policy: ComputePolicy | None = None
+    if compute_raw is not None:
+        if not isinstance(compute_raw, dict):
+            raise ValidationError("compute_policy must be an object")
+        compute_policy = ComputePolicy(
+            min_vram_gb=_positive_int_or_none(
+                compute_raw.get("min_vram_gb"),
+                "compute_policy.min_vram_gb",
+            ),
+            min_ram_per_gpu_gb=_positive_int_or_none(
+                compute_raw.get("min_ram_per_gpu_gb"),
+                "compute_policy.min_ram_per_gpu_gb",
+            ),
+            gpu_count=int(compute_raw.get("gpu_count", 1)),
+        )
+        if compute_policy.gpu_count <= 0:
+            raise ValidationError("compute_policy.gpu_count must be > 0")
 
     return AppSpecV1(
         app_id=str(raw["app_id"]),
@@ -89,6 +117,7 @@ def parse_app_spec(path: Path) -> AppSpecV1:
             min_file_size_mb=int(cache_raw.get("min_file_size_mb", 100)),
             symlink_targets=[str(item) for item in cache_raw.get("symlink_targets", [])],
         ),
+        compute_policy=compute_policy,
         build=BuildSpec(
             comfy_version=str(build_raw["comfy_version"]),
             plugins=plugins,

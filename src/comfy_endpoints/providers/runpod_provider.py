@@ -153,6 +153,92 @@ class RunpodProvider(CloudProviderAdapter):
         except JSONDecodeError:
             return raw
 
+    def _graphql_request(self, query: str, variables: dict[str, Any] | None = None) -> Any:
+        payload: dict[str, Any] = {"query": query}
+        if variables:
+            payload["variables"] = variables
+
+        req = urllib.request.Request(
+            self.config.api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {self._api_key()}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RunpodError(f"RunPod GraphQL HTTP error {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RunpodError(f"RunPod GraphQL connection error: {exc.reason}") from exc
+
+        try:
+            parsed = json.loads(raw or "{}")
+        except JSONDecodeError as exc:
+            raise RunpodError("RunPod GraphQL returned invalid JSON") from exc
+
+        if not isinstance(parsed, dict):
+            raise RunpodError("RunPod GraphQL response was not an object")
+        if parsed.get("errors"):
+            raise RunpodError(f"RunPod GraphQL error: {parsed.get('errors')}")
+        return parsed.get("data", {})
+
+    @staticmethod
+    def _gpu_vram_gb(gpu_entry: dict[str, Any]) -> float:
+        for key in ("memoryInGb", "memoryInGB", "memoryGb", "memory", "vram"):
+            value = gpu_entry.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _gpu_type_ids_with_min_vram(self, min_vram_gb: int) -> list[str]:
+        data = self._graphql_request(
+            """
+            query GetGpuTypes {
+              gpuTypes {
+                id
+                displayName
+                memoryInGb
+              }
+            }
+            """
+        )
+        gpu_types = []
+        if isinstance(data, dict):
+            raw_gpu_types = data.get("gpuTypes")
+            if isinstance(raw_gpu_types, list):
+                gpu_types = [item for item in raw_gpu_types if isinstance(item, dict)]
+
+        if not gpu_types:
+            raise RunpodError("Unable to resolve RunPod GPU catalog for min_vram_gb filtering")
+
+        candidate_ids: list[str] = []
+        discovered: list[str] = []
+        for item in gpu_types:
+            gpu_id = str(item.get("id") or "").strip()
+            if not gpu_id:
+                continue
+            vram_gb = self._gpu_vram_gb(item)
+            display_name = str(item.get("displayName") or gpu_id)
+            discovered.append(f"{display_name}:{vram_gb:g}GB")
+            if vram_gb >= float(min_vram_gb):
+                candidate_ids.append(gpu_id)
+
+        if not candidate_ids:
+            details = ", ".join(discovered[:20]) if discovered else "none"
+            raise RunpodError(
+                f"No RunPod GPU types satisfy min_vram_gb={min_vram_gb}. Available: {details}"
+            )
+        return candidate_ids
+
     @staticmethod
     def _collect_log_lines(payload: Any, lines: list[str]) -> None:
         if payload is None:
@@ -225,6 +311,13 @@ class RunpodProvider(CloudProviderAdapter):
         env["COMFY_HEADLESS"] = "1"
 
         image_ref = app_spec.build.image_ref or "ghcr.io/comfy-endpoints/golden:latest"
+        compute_policy = app_spec.compute_policy
+        gpu_count = compute_policy.gpu_count if compute_policy else 1
+        min_ram_per_gpu_gb = compute_policy.min_ram_per_gpu_gb if compute_policy else None
+        min_vram_gb = compute_policy.min_vram_gb if compute_policy else None
+        gpu_type_ids: list[str] | None = None
+        if min_vram_gb is not None:
+            gpu_type_ids = self._gpu_type_ids_with_min_vram(min_vram_gb)
         profiles = self._deployment_profiles()
         last_error: Exception | None = None
         for idx in range(self._create_profile_index, len(profiles)):
@@ -233,7 +326,7 @@ class RunpodProvider(CloudProviderAdapter):
             payload = {
                 "name": f"comfy-endpoints-{app_spec.app_id}",
                 "imageName": image_ref,
-                "gpuCount": 1,
+                "gpuCount": gpu_count,
                 "cloudType": cloud_type,
                 "interruptible": interruptible,
                 "containerDiskInGb": 30,
@@ -244,6 +337,10 @@ class RunpodProvider(CloudProviderAdapter):
                 "dataCenterIds": [data_center_id],
                 "supportPublicIp": True,
             }
+            if min_ram_per_gpu_gb is not None:
+                payload["minRAMPerGPU"] = min_ram_per_gpu_gb
+            if gpu_type_ids:
+                payload["gpuTypeIds"] = gpu_type_ids
             if app_spec.build.container_registry_auth_id:
                 payload["containerRegistryAuthId"] = app_spec.build.container_registry_auth_id
 

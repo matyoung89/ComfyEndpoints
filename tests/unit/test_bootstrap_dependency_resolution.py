@@ -7,6 +7,7 @@ from unittest import mock
 
 from comfy_endpoints.deploy.bootstrap import (
     MissingModelRequirement,
+    _ensure_model_roots_on_cache,
     _fetch_manager_default_model_list,
     _install_missing_models,
     _iter_model_entries,
@@ -76,12 +77,15 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
             root = Path(tmp_dir)
             requirements = [MissingModelRequirement(input_name="clip_name1", filename="clip_l.safetensors")]
             with mock.patch("comfy_endpoints.deploy.bootstrap._download_file") as mocked_download:
-                count = _install_missing_models(FakeComfyClient(), requirements, root)
+                count = _install_missing_models(FakeComfyClient(), requirements, root / "cache_models")
 
             self.assertEqual(count, 1)
             mocked_download.assert_called_once()
             target_path = mocked_download.call_args.args[1]
-            self.assertEqual(str(target_path), str(root / "models" / "text_encoders" / "clip_l.safetensors"))
+            self.assertEqual(
+                str(target_path),
+                str(root / "cache_models" / "text_encoders" / "clip_l.safetensors"),
+            )
 
     def test_install_missing_models_falls_back_to_default_catalog(self) -> None:
         class EmptyManagerClient:
@@ -105,10 +109,33 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
                 return_value=fallback_payload,
             ):
                 with mock.patch("comfy_endpoints.deploy.bootstrap._download_file") as mocked_download:
-                    count = _install_missing_models(EmptyManagerClient(), requirements, root)
+                    count = _install_missing_models(EmptyManagerClient(), requirements, root / "cache_models")
 
             self.assertEqual(count, 1)
             mocked_download.assert_called_once()
+
+    def test_ensure_model_roots_on_cache_replaces_local_dirs_with_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            comfy_models_root = root / "opt_comfy_models"
+            cache_models_root = root / "cache_models"
+            checkpoints_dir = comfy_models_root / "checkpoints"
+            checkpoints_dir.mkdir(parents=True)
+            local_model = checkpoints_dir / "demo.safetensors"
+            local_model.write_bytes(b"model")
+
+            _ensure_model_roots_on_cache(
+                comfy_models_root=comfy_models_root,
+                cache_models_root=cache_models_root,
+            )
+
+            symlinked_checkpoints = comfy_models_root / "checkpoints"
+            self.assertTrue(symlinked_checkpoints.is_symlink())
+            self.assertEqual(
+                symlinked_checkpoints.resolve(),
+                (cache_models_root / "checkpoints").resolve(),
+            )
+            self.assertTrue((cache_models_root / "checkpoints" / "demo.safetensors").exists())
 
     def test_missing_models_parse_from_object_info_dropdown_mismatch(self) -> None:
         prompt_payload = {

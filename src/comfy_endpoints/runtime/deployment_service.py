@@ -136,6 +136,10 @@ class DeploymentService:
         env["COMFY_ENDPOINTS_WORKFLOW_JSON"] = workflow_json
         env["COMFY_ENDPOINTS_STATE_DB"] = "/opt/comfy_endpoints/runtime/jobs.db"
         env["COMFY_ENDPOINTS_ARTIFACTS_DIR"] = "/opt/comfy_endpoints/runtime/artifacts"
+        env["COMFY_ENDPOINTS_CACHE_ROOT"] = "/cache"
+        env["COMFY_ENDPOINTS_CACHE_MODEL_ROOT"] = "/cache/models"
+        env["COMFY_ENDPOINTS_WATCH_PATHS"] = ",".join(app_spec.cache_policy.watch_paths)
+        env["COMFY_ENDPOINTS_MIN_FILE_SIZE_MB"] = str(app_spec.cache_policy.min_file_size_mb)
         mounts = [{"source": "cache", "target": "/cache"}]
 
         deployment_id = ""
@@ -270,6 +274,8 @@ class DeploymentService:
                 "contract_id": contract.contract_id,
                 "status_detail": status.detail,
                 "pod_logs_tail": latest_logs,
+                "cache_mount_path": "/cache",
+                "cache_model_root": "/cache/models",
             },
         )
         self.state_store.put(record)

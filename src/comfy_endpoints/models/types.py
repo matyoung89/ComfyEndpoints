@@ -44,6 +44,13 @@ class CachePolicy:
 
 
 @dataclass(slots=True)
+class ComputePolicy:
+    min_vram_gb: int | None = None
+    min_ram_per_gpu_gb: int | None = None
+    gpu_count: int = 1
+
+
+@dataclass(slots=True)
 class BuildPluginSpec:
     repo: str
     ref: str
@@ -75,6 +82,7 @@ class AppSpecV1:
     endpoint: EndpointSpec
     cache_policy: CachePolicy
     build: BuildSpec
+    compute_policy: ComputePolicy | None = None
 
 
 @dataclass(slots=True)
