@@ -79,11 +79,12 @@ class ImageManager:
 
         if progress_callback:
             progress_callback("[image:golden] image missing; starting build/push")
-        plugin_payload = [
-            {"repo": plugin.repo, "ref": plugin.ref}
-            for plugin in app_spec.build.plugins
-            if "comfyui" not in plugin.repo.lower()
-        ]
+        comfyui_repo, comfyui_ref = resolve_comfyui_source(app_spec)
+        plugin_payload = []
+        for plugin in app_spec.build.plugins:
+            if plugin.repo.strip() == comfyui_repo and plugin.ref.strip() == comfyui_ref:
+                continue
+            plugin_payload.append({"repo": plugin.repo, "ref": plugin.ref})
         self._build_and_push(
             image_ref=image_ref,
             dockerfile_path=app_spec.build.dockerfile_path or "docker/Dockerfile.golden",
