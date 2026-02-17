@@ -584,6 +584,21 @@ def _install_custom_node_by_git_clone(repo_url: str, ref: str = "main") -> bool:
     return True
 
 
+def _install_custom_node_python_dependencies(repo_url: str) -> None:
+    repo_name = _repo_dir_name(repo_url)
+    if not repo_name:
+        return
+    node_root = Path("/opt/comfy/custom_nodes") / repo_name
+    if not node_root.exists() or not node_root.is_dir():
+        return
+    requirements_path = node_root / "requirements.txt"
+    if requirements_path.exists():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", str(requirements_path)],
+            check=True,
+        )
+
+
 def _install_missing_custom_nodes(
     comfy_client: ComfyClient,
     requirements: list[MissingNodeRequirement],
@@ -649,6 +664,7 @@ def _install_missing_custom_nodes(
                 )
                 try:
                     if _install_custom_node_by_git_clone(repo_url):
+                        _install_custom_node_python_dependencies(repo_url)
                         installed_count += 1
                         installed = True
                         print(
