@@ -140,6 +140,10 @@ MODEL_DIR_BY_TYPE = {
 NODE_CLASS_REPO_OVERRIDES = {
     "Wan22Animate": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
 }
+
+NODE_CLASS_PIP_OVERRIDES = {
+    "Wan22Animate": ["accelerate"],
+}
 MODEL_SUBDIRS = {
     "checkpoints",
     "diffusion_models",
@@ -599,6 +603,16 @@ def _install_custom_node_python_dependencies(repo_url: str) -> None:
         )
 
 
+def _install_custom_node_override_packages(class_type: str) -> None:
+    packages = NODE_CLASS_PIP_OVERRIDES.get(class_type, [])
+    if not packages:
+        return
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir", *packages],
+        check=True,
+    )
+
+
 def _install_missing_custom_nodes(
     comfy_client: ComfyClient,
     requirements: list[MissingNodeRequirement],
@@ -665,6 +679,7 @@ def _install_missing_custom_nodes(
                 try:
                     if _install_custom_node_by_git_clone(repo_url):
                         _install_custom_node_python_dependencies(repo_url)
+                        _install_custom_node_override_packages(requirement.class_type)
                         installed_count += 1
                         installed = True
                         print(

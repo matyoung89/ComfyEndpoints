@@ -355,13 +355,17 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
             with mock.patch(
                 "comfy_endpoints.deploy.bootstrap._install_custom_node_python_dependencies",
             ) as mocked_deps:
-                count = _install_missing_custom_nodes(
-                    comfy_client=FakeComfyClient(),
-                    requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
-                )
+                with mock.patch(
+                    "comfy_endpoints.deploy.bootstrap._install_custom_node_override_packages",
+                ) as mocked_override_pkgs:
+                    count = _install_missing_custom_nodes(
+                        comfy_client=FakeComfyClient(),
+                        requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
+                    )
         self.assertEqual(count, 1)
         mocked_clone.assert_called_once_with("https://github.com/example/custom-wan-node")
         mocked_deps.assert_called_once_with("https://github.com/example/custom-wan-node")
+        mocked_override_pkgs.assert_called_once_with("Wan22Animate")
 
     def test_package_id_mapping_resolves_repo_urls(self) -> None:
         mappings_payload = {
