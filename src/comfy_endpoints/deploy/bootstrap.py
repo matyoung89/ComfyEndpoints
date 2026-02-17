@@ -136,6 +136,10 @@ MODEL_DIR_BY_TYPE = {
     "controlnet": "controlnet",
     "control_net": "controlnet",
 }
+
+NODE_CLASS_REPO_OVERRIDES = {
+    "Wan22Animate": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
+}
 MODEL_SUBDIRS = {
     "checkpoints",
     "diffusion_models",
@@ -539,6 +543,47 @@ def _fetch_manager_default_node_mappings() -> object:
     return json.loads(body or "{}")
 
 
+def _repo_dir_name(repo_url: str) -> str:
+    cleaned = repo_url.rstrip("/")
+    name = cleaned.rsplit("/", 1)[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name.strip()
+
+
+def _install_custom_node_by_git_clone(repo_url: str, ref: str = "main") -> bool:
+    repo = repo_url.strip()
+    if not repo:
+        return False
+    custom_nodes_root = Path("/opt/comfy/custom_nodes")
+    custom_nodes_root.mkdir(parents=True, exist_ok=True)
+    repo_name = _repo_dir_name(repo)
+    if not repo_name:
+        return False
+
+    target_dir = custom_nodes_root / repo_name
+    if target_dir.exists():
+        subprocess.run(
+            ["git", "-C", str(target_dir), "fetch", "--depth", "1", "origin", ref],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(target_dir), "checkout", ref],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", ref, repo, str(target_dir)],
+        check=True,
+    )
+    return True
+
+
 def _install_missing_custom_nodes(
     comfy_client: ComfyClient,
     requirements: list[MissingNodeRequirement],
@@ -575,6 +620,8 @@ def _install_missing_custom_nodes(
             package_ids = _find_package_ids_for_node_class(requirement.class_type, mapping_payload)
             candidate_urls.update(_find_repo_urls_for_package_ids(package_ids, list_payload))
         if not candidate_urls:
+            candidate_urls.update(NODE_CLASS_REPO_OVERRIDES.get(requirement.class_type, []))
+        if not candidate_urls:
             print(
                 f"[bootstrap] no catalog match for required node class_type={requirement.class_type}",
                 file=sys.stderr,
@@ -600,6 +647,21 @@ def _install_missing_custom_nodes(
                     f"[bootstrap] failed custom node install repo={repo_url}: {exc}",
                     file=sys.stderr,
                 )
+                try:
+                    if _install_custom_node_by_git_clone(repo_url):
+                        installed_count += 1
+                        installed = True
+                        print(
+                            f"[bootstrap] installed custom node via git clone "
+                            f"class_type={requirement.class_type} repo={repo_url}",
+                            file=sys.stderr,
+                        )
+                        break
+                except Exception as clone_exc:  # noqa: BLE001
+                    print(
+                        f"[bootstrap] fallback git clone failed repo={repo_url}: {clone_exc}",
+                        file=sys.stderr,
+                    )
 
         if not installed:
             print(

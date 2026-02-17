@@ -169,14 +169,20 @@ class DeploymentService:
                 progress_callback(
                     f"[deploy] destroying {len(carried_deployment_ids)} existing deployment(s) for app_id={app_spec.app_id}"
                 )
+            destroy_errors: list[str] = []
             for tracked_id in carried_deployment_ids:
                 try:
                     existing_provider.destroy(tracked_id)
                 except Exception as exc:  # noqa: BLE001
+                    destroy_errors.append(f"{tracked_id}: {exc}")
                     if progress_callback:
                         progress_callback(
                             f"[deploy] existing destroy failed deployment_id={tracked_id}: {exc}"
                         )
+            if destroy_errors:
+                raise RuntimeError(
+                    "Auto-destroy failed for existing deployment(s): " + " | ".join(destroy_errors)
+                )
             self.state_store.delete(app_spec.app_id)
             carried_deployment_ids = []
 

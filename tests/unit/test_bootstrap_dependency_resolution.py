@@ -311,6 +311,54 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(client.installs, ["https://github.com/example/custom-wan-node"])
 
+    def test_install_missing_custom_nodes_uses_override_when_catalog_missing(self) -> None:
+        class FakeComfyClient:
+            def __init__(self):
+                self.installs = []
+
+            def get_custom_node_mappings(self):
+                return {}
+
+            def get_custom_node_list(self):
+                return {}
+
+            def install_custom_node_by_git_url(self, git_url: str):
+                self.installs.append(git_url)
+                return "ok"
+
+        client = FakeComfyClient()
+        count = _install_missing_custom_nodes(
+            comfy_client=client,
+            requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(client.installs, ["https://github.com/kijai/ComfyUI-WanVideoWrapper"])
+
+    def test_install_missing_custom_nodes_falls_back_to_git_clone(self) -> None:
+        class FakeComfyClient:
+            def get_custom_node_mappings(self):
+                return {
+                    "https://github.com/example/custom-wan-node": [["Wan22Animate"]],
+                }
+
+            def get_custom_node_list(self):
+                return {}
+
+            def install_custom_node_by_git_url(self, git_url: str):
+                _ = git_url
+                raise ComfyClientError("manager unavailable")
+
+        with mock.patch(
+            "comfy_endpoints.deploy.bootstrap._install_custom_node_by_git_clone",
+            return_value=True,
+        ) as mocked_clone:
+            count = _install_missing_custom_nodes(
+                comfy_client=FakeComfyClient(),
+                requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
+            )
+        self.assertEqual(count, 1)
+        mocked_clone.assert_called_once_with("https://github.com/example/custom-wan-node")
+
     def test_package_id_mapping_resolves_repo_urls(self) -> None:
         mappings_payload = {
             "example-wan-pack": ["Wan22Animate"],

@@ -93,6 +93,13 @@ class TrackingDestroyProvider(FakeProvider):
         self.destroyed_ids.append(str(deployment_id))
 
 
+class FailingDestroyProvider(TrackingDestroyProvider):
+    def destroy(self, deployment_id):
+        self.destroyed_ids.append(str(deployment_id))
+        if str(deployment_id) == "old-secondary":
+            raise RuntimeError("destroy failed")
+
+
 class DeploymentServiceTest(unittest.TestCase):
     @staticmethod
     def _workflow_payload() -> dict:
@@ -709,6 +716,83 @@ class DeploymentServiceTest(unittest.TestCase):
             self.assertEqual(provider.destroyed_ids, [])
             self.assertIn("old-primary", record.metadata.get("tracked_deployment_ids", []))
             self.assertIn("dep-123", record.metadata.get("tracked_deployment_ids", []))
+
+    def test_deploy_auto_destroy_failure_aborts_and_preserves_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app_path = root / "app.json"
+            workflow_path = root / "workflow.json"
+            contract_path = root / "workflow.contract.json"
+
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "demo-contract",
+                        "version": "v1",
+                        "inputs": [{"name": "prompt", "type": "string", "required": True, "node_id": "1"}],
+                        "outputs": [{"name": "image", "type": "image/png", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "demo",
+                        "version": "v1",
+                        "workflow_path": "./workflow.json",
+                        "provider": "runpod",
+                        "gpu_profile": "A10G",
+                        "regions": ["US"],
+                        "env": {},
+                        "endpoint": {
+                            "name": "run",
+                            "mode": "async",
+                            "auth_mode": "api_key",
+                            "timeout_seconds": 300,
+                            "max_payload_mb": 10,
+                        },
+                        "cache_policy": {
+                            "watch_paths": ["/tmp/models"],
+                            "min_file_size_mb": 100,
+                            "symlink_targets": ["/tmp/models"],
+                        },
+                        "build": {"comfy_version": "0.3.26", "plugins": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = DeploymentService(state_dir=root / "state")
+            service.state_store.put(
+                DeploymentRecord(
+                    app_id="demo",
+                    deployment_id="old-primary",
+                    provider=ProviderName.RUNPOD,
+                    state=DeploymentState.BOOTSTRAPPING,
+                    endpoint_url="https://old-primary.example.com",
+                    api_key_ref="secret://demo/api_key",
+                    metadata={"tracked_deployment_ids": ["old-primary", "old-secondary"]},
+                )
+            )
+            provider = FailingDestroyProvider()
+            with mock.patch("comfy_endpoints.runtime.deployment_service.build_provider", return_value=provider):
+                service.image_manager = mock.Mock(
+                    ensure_image=mock.Mock(
+                        return_value=ImageResolution(
+                            image_ref="ghcr.io/comfy-endpoints/golden:test",
+                            image_exists=True,
+                            built=False,
+                        )
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "Auto-destroy failed"):
+                    service.deploy(app_path)
+
+            persisted = service.state_store.get("demo")
+            self.assertIsNotNone(persisted)
+            self.assertEqual(provider.destroyed_ids, ["old-primary", "old-secondary"])
 
     def test_destroy_uses_tracked_deployment_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
