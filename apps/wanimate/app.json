@@ -44,6 +44,10 @@
       {
         "repo": "https://github.com/comfyanonymous/ComfyUI",
         "ref": "master"
+      },
+      {
+        "repo": "https://github.com/Comfy-Org/ComfyUI-Manager",
+        "ref": "main"
       }
     ]
   }
