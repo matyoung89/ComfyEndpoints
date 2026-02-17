@@ -133,6 +133,37 @@ class ImageResolverAndManagerTest(unittest.TestCase):
 
             self.assertTrue(result.built)
 
+    def test_image_manager_passes_plugin_build_arg_for_golden_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "docker").mkdir(parents=True)
+            (root / "docker" / "Dockerfile.comfybase").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+            (root / "docker" / "Dockerfile.golden").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+            app_spec = _app_spec(root)
+            app_spec.build.base_dockerfile_path = str(root / "docker" / "Dockerfile.comfybase")
+            app_spec.build.dockerfile_path = str(root / "docker" / "Dockerfile.golden")
+
+            manager = ImageManager(project_root=root)
+            with mock.patch.object(manager, "_image_exists", side_effect=[True, False]):
+                with mock.patch.object(manager, "_build_and_push") as mocked_build:
+                    with mock.patch.object(manager, "_wait_for_image", return_value=None):
+                        with mock.patch(
+                            "comfy_endpoints.runtime.image_fingerprint._hash_paths",
+                            return_value="src-hash",
+                        ):
+                            with mock.patch(
+                                "comfy_endpoints.runtime.image_fingerprint._git_fingerprint",
+                                return_value="git-hash",
+                            ):
+                                manager.ensure_image(app_spec)
+
+            _, kwargs = mocked_build.call_args
+            self.assertIn("build_args", kwargs)
+            build_args = kwargs["build_args"]
+            self.assertIn("BASE_IMAGE", build_args)
+            self.assertIn("COMFY_PLUGINS_JSON", build_args)
+            self.assertIn("https://example.com/plugin", build_args["COMFY_PLUGINS_JSON"])
+
 
 if __name__ == "__main__":
     unittest.main()

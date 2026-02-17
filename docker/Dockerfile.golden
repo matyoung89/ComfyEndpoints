@@ -1,5 +1,6 @@
 ARG BASE_IMAGE=ghcr.io/comfy-endpoints/comfybase:latest
 FROM ${BASE_IMAGE}
+ARG COMFY_PLUGINS_JSON=[]
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /opt/comfy_endpoints
@@ -8,6 +9,68 @@ COPY . /opt/comfy_endpoints
 RUN pip install --no-cache-dir -e .
 RUN mkdir -p /opt/comfy/custom_nodes \
  && ln -s /opt/comfy_endpoints/comfy_plugin/comfy_endpoints_contract /opt/comfy/custom_nodes/comfy_endpoints_contract
+RUN COMFY_PLUGINS_JSON="${COMFY_PLUGINS_JSON}" python - <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+
+def _repo_dir_name(repo_url: str) -> str:
+    cleaned = repo_url.rstrip("/")
+    repo_name = cleaned.rsplit("/", 1)[-1]
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+    return repo_name.strip()
+
+
+raw = os.environ.get("COMFY_PLUGINS_JSON", "[]").strip() or "[]"
+try:
+    plugins = json.loads(raw)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"Invalid COMFY_PLUGINS_JSON: {exc}") from exc
+
+custom_nodes_root = pathlib.Path("/opt/comfy/custom_nodes")
+custom_nodes_root.mkdir(parents=True, exist_ok=True)
+
+for plugin in plugins:
+    if not isinstance(plugin, dict):
+        continue
+    repo = str(plugin.get("repo", "")).strip()
+    ref = str(plugin.get("ref", "")).strip() or "main"
+    if not repo:
+        continue
+    repo_dir_name = _repo_dir_name(repo)
+    if not repo_dir_name:
+        continue
+
+    target_dir = custom_nodes_root / repo_dir_name
+    if target_dir.exists():
+        subprocess.run(
+            ["git", "-C", str(target_dir), "fetch", "--depth", "1", "origin", ref],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(target_dir), "checkout", ref],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", ref, repo, str(target_dir)],
+            check=True,
+        )
+
+    cli_only_mode_flag = target_dir / ".enable-cli-only-mode"
+    if cli_only_mode_flag.exists():
+        cli_only_mode_flag.unlink()
+
+print(f"Installed custom node plugins: {len(plugins)}", file=sys.stderr)
+PY
 
 EXPOSE 3000
 ENTRYPOINT ["/opt/comfy_endpoints/docker/entrypoint.sh"]
