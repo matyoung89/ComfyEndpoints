@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -56,6 +57,10 @@ class DeploymentService:
         except urllib.error.URLError as exc:
             reason = str(exc.reason) if exc.reason else "connection error"
             return False, f"URL error: {reason}"
+        except TimeoutError:
+            return False, "timeout"
+        except socket.timeout:
+            return False, "timeout"
 
     @staticmethod
     def _new_log_lines(previous: str, current: str, max_lines: int = 25) -> list[str]:
@@ -82,6 +87,10 @@ class DeploymentService:
         getter = getattr(provider, "get_logs", None)
         if not callable(getter):
             return ""
+        try:
+            return str(getter(deployment_id, tail_lines=tail_lines) or "")
+        except Exception:  # noqa: BLE001
+            return ""
 
     @staticmethod
     def _is_bid_related_failure(detail: str) -> bool:
@@ -96,10 +105,6 @@ class DeploymentService:
             "capacity",
         )
         return any(marker in lowered for marker in markers)
-        try:
-            return str(getter(deployment_id, tail_lines=tail_lines) or "")
-        except Exception:  # noqa: BLE001
-            return ""
 
     def deploy(
         self,

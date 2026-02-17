@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 import unittest
 from unittest import mock
 
@@ -13,6 +14,9 @@ class _MockResponse:
 
     def read(self) -> bytes:
         return self._payload
+
+    def close(self) -> None:
+        return None
 
     def __enter__(self):
         return self
@@ -62,7 +66,7 @@ class ComfyClientTest(unittest.TestCase):
             _ = client.get_external_models()
 
         request = mocked_urlopen.call_args.args[0]
-        self.assertIn("/externalmodel/getlist?mode=default", request.full_url)
+        self.assertIn("/api/externalmodel/getlist?mode=default", request.full_url)
 
     def test_get_custom_node_mappings_uses_mode_query(self) -> None:
         client = ComfyClient("http://127.0.0.1:8188")
@@ -72,7 +76,7 @@ class ComfyClientTest(unittest.TestCase):
         ) as mocked_urlopen:
             _ = client.get_custom_node_mappings()
         request = mocked_urlopen.call_args.args[0]
-        self.assertIn("/customnode/getmappings?mode=default", request.full_url)
+        self.assertIn("/api/customnode/getmappings?mode=default", request.full_url)
 
     def test_get_custom_node_list_uses_mode_query(self) -> None:
         client = ComfyClient("http://127.0.0.1:8188")
@@ -82,15 +86,39 @@ class ComfyClientTest(unittest.TestCase):
         ) as mocked_urlopen:
             _ = client.get_custom_node_list()
         request = mocked_urlopen.call_args.args[0]
-        self.assertIn("/customnode/getlist?mode=default&skip_update=true", request.full_url)
+        self.assertIn("/api/customnode/getlist?mode=default&skip_update=true", request.full_url)
 
     def test_install_custom_node_by_git_url_posts_plain_text(self) -> None:
         client = ComfyClient("http://127.0.0.1:8188")
         with mock.patch("urllib.request.urlopen", return_value=_MockResponse(b"ok")) as mocked_urlopen:
             _ = client.install_custom_node_by_git_url("https://github.com/example/custom-node")
         request = mocked_urlopen.call_args.args[0]
-        self.assertIn("/customnode/install/git_url", request.full_url)
+        self.assertIn("/api/customnode/install/git_url", request.full_url)
         self.assertEqual(request.data, b"https://github.com/example/custom-node")
+
+    def test_custom_node_list_falls_back_to_legacy_path_on_404(self) -> None:
+        client = ComfyClient("http://127.0.0.1:8188")
+        http_404 = urllib.error.HTTPError(
+            url="http://127.0.0.1:8188/api/customnode/getlist",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=_MockResponse(b""),
+        )
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=[
+                http_404,
+                _MockResponse(json.dumps({"node_packs": []}).encode("utf-8")),
+            ],
+        ) as mocked_urlopen:
+            payload = client.get_custom_node_list()
+
+        self.assertEqual(payload, {"node_packs": []})
+        first_request = mocked_urlopen.call_args_list[0].args[0]
+        second_request = mocked_urlopen.call_args_list[1].args[0]
+        self.assertIn("/api/customnode/getlist", first_request.full_url)
+        self.assertIn("/manager/customnode/getlist", second_request.full_url)
 
 
 if __name__ == "__main__":
