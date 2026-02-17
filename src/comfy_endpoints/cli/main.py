@@ -531,6 +531,7 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
     svc = _service(args.state_dir)
     record = svc.deploy(
         Path(args.app_spec).resolve(),
+        keep_existing=bool(args.keep_existing),
         progress_callback=lambda msg: print(f"[deploy] {msg}", file=sys.stderr),
     )
     print(
@@ -922,6 +923,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     deploy_cmd = subparsers.add_parser("deploy", help="Deploy the app to configured provider")
     deploy_cmd.add_argument("app_spec")
+    deploy_cmd.add_argument(
+        "--keep-existing",
+        action="store_true",
+        default=False,
+        help="Skip automatic destroy of existing deployments for the app before deploying",
+    )
     deploy_cmd.set_defaults(func=_cmd_deploy)
 
     status_cmd = subparsers.add_parser("status", help="Check deployment status")

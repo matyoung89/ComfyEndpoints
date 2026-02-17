@@ -28,6 +28,54 @@ class DeploymentService:
         self.state_store = DeploymentStore(state_dir=state_dir)
         self.image_manager = ImageManager()
 
+    @staticmethod
+    def _tracked_deployment_ids(record: DeploymentRecord | None) -> list[str]:
+        if record is None:
+            return []
+        values: list[str] = []
+        raw = record.metadata.get("tracked_deployment_ids")
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    values.append(item.strip())
+        if record.deployment_id and record.deployment_id not in values:
+            values.append(record.deployment_id)
+        return values
+
+    def _persist_record(
+        self,
+        *,
+        app_id: str,
+        provider_name,
+        deployment_id: str,
+        state: DeploymentState,
+        endpoint_url: str | None,
+        api_key_ref: str,
+        metadata: dict,
+    ) -> DeploymentRecord:
+        record = DeploymentRecord(
+            app_id=app_id,
+            deployment_id=deployment_id,
+            provider=provider_name,
+            state=state,
+            endpoint_url=endpoint_url,
+            api_key_ref=api_key_ref,
+            metadata=metadata,
+        )
+        self.state_store.put(record)
+        return record
+
+    @staticmethod
+    def _unique_ids(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for value in values:
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+        return ordered
+
     def validate(self, app_spec_path: Path) -> tuple[str, str]:
         app_spec, contract = validate_deployable_spec(app_spec_path)
         return app_spec.app_id, contract.contract_id
@@ -109,9 +157,29 @@ class DeploymentService:
     def deploy(
         self,
         app_spec_path: Path,
+        keep_existing: bool = False,
         progress_callback: Callable[[str], None] | None = None,
     ) -> DeploymentRecord:
         app_spec, contract = validate_deployable_spec(app_spec_path)
+        existing_record = self.state_store.get(app_spec.app_id)
+        carried_deployment_ids = self._tracked_deployment_ids(existing_record)
+        if existing_record and not keep_existing:
+            existing_provider = build_provider(existing_record.provider)
+            if progress_callback:
+                progress_callback(
+                    f"[deploy] destroying {len(carried_deployment_ids)} existing deployment(s) for app_id={app_spec.app_id}"
+                )
+            for tracked_id in carried_deployment_ids:
+                try:
+                    existing_provider.destroy(tracked_id)
+                except Exception as exc:  # noqa: BLE001
+                    if progress_callback:
+                        progress_callback(
+                            f"[deploy] existing destroy failed deployment_id={tracked_id}: {exc}"
+                        )
+            self.state_store.delete(app_spec.app_id)
+            carried_deployment_ids = []
+
         provider = build_provider(app_spec.provider)
         if progress_callback:
             progress_callback("[deploy] validated app spec and workflow contract")
@@ -152,12 +220,36 @@ class DeploymentService:
         status = None
         last_error = ""
         latest_logs = ""
+        tracked_deployment_ids = list(carried_deployment_ids)
+        api_key_ref = f"secret://{app_spec.app_id}/api_key"
+        base_metadata = {
+            "image_ref": image_ref,
+            "image_built": image_resolution.built,
+            "contract_id": contract.contract_id,
+            "cache_mount_path": "/cache",
+            "cache_model_root": "/cache/models",
+        }
 
         for attempt in range(1, max_attempts + 1):
             if progress_callback:
                 progress_callback(f"[deploy] deploy attempt {attempt}/{max_attempts}")
 
             deployment_id = provider.create_deployment(app_spec)
+            tracked_deployment_ids = self._unique_ids(tracked_deployment_ids + [deployment_id])
+            self._persist_record(
+                app_id=app_spec.app_id,
+                provider_name=app_spec.provider,
+                deployment_id=deployment_id,
+                state=DeploymentState.PENDING,
+                endpoint_url=endpoint_url or None,
+                api_key_ref=api_key_ref,
+                metadata={
+                    **base_metadata,
+                    "status_detail": f"created deployment_id={deployment_id}",
+                    "pod_logs_tail": latest_logs,
+                    "tracked_deployment_ids": tracked_deployment_ids,
+                },
+            )
             if progress_callback:
                 progress_callback(f"[deploy] created deployment_id={deployment_id}")
             try:
@@ -239,6 +331,20 @@ class DeploymentService:
                 if status.state == DeploymentState.READY:
                     detail = f"{detail} ({endpoint_probe_detail})"
                 last_error = detail
+                self._persist_record(
+                    app_id=app_spec.app_id,
+                    provider_name=app_spec.provider,
+                    deployment_id=deployment_id,
+                    state=status.state if status else DeploymentState.FAILED,
+                    endpoint_url=endpoint_url or None,
+                    api_key_ref=api_key_ref,
+                    metadata={
+                        **base_metadata,
+                        "status_detail": detail,
+                        "pod_logs_tail": latest_logs,
+                        "tracked_deployment_ids": tracked_deployment_ids,
+                    },
+                )
                 bid_related_failure = self._is_bid_related_failure(detail)
                 if attempt < max_attempts and bid_related_failure:
                     if progress_callback:
@@ -248,6 +354,20 @@ class DeploymentService:
                 break
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
+                self._persist_record(
+                    app_id=app_spec.app_id,
+                    provider_name=app_spec.provider,
+                    deployment_id=deployment_id,
+                    state=DeploymentState.FAILED,
+                    endpoint_url=endpoint_url or None,
+                    api_key_ref=api_key_ref,
+                    metadata={
+                        **base_metadata,
+                        "status_detail": last_error,
+                        "pod_logs_tail": latest_logs,
+                        "tracked_deployment_ids": tracked_deployment_ids,
+                    },
+                )
                 try:
                     provider.destroy(deployment_id)
                 except Exception:  # noqa: BLE001
@@ -272,15 +392,12 @@ class DeploymentService:
             provider=app_spec.provider,
             state=status.state,
             endpoint_url=endpoint_url,
-            api_key_ref=f"secret://{app_spec.app_id}/api_key",
+            api_key_ref=api_key_ref,
             metadata={
-                "image_ref": image_ref,
-                "image_built": image_resolution.built,
-                "contract_id": contract.contract_id,
+                **base_metadata,
                 "status_detail": status.detail,
                 "pod_logs_tail": latest_logs,
-                "cache_mount_path": "/cache",
-                "cache_model_root": "/cache/models",
+                "tracked_deployment_ids": tracked_deployment_ids,
             },
         )
         self.state_store.put(record)
@@ -330,5 +447,13 @@ class DeploymentService:
             return
 
         provider = build_provider(record.provider)
-        provider.destroy(record.deployment_id)
+        tracked_ids = self._tracked_deployment_ids(record)
+        errors: list[str] = []
+        for deployment_id in tracked_ids:
+            try:
+                provider.destroy(deployment_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{deployment_id}: {exc}")
+        if errors:
+            raise RuntimeError("Failed to destroy deployment(s): " + " | ".join(errors))
         self.state_store.delete(record.app_id)

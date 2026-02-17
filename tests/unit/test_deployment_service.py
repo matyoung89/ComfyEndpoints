@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from comfy_endpoints.models import DeploymentState
+from comfy_endpoints.models import DeploymentRecord, DeploymentState, ProviderName
 from comfy_endpoints.providers.base import DeploymentStatus
 from comfy_endpoints.runtime.deployment_service import DeploymentService
 from comfy_endpoints.runtime.image_manager import ImageResolution
@@ -82,6 +82,15 @@ class DeployImageErrorProvider(FakeProvider):
     def destroy(self, deployment_id):
         _ = deployment_id
         self.destroy_calls += 1
+
+
+class TrackingDestroyProvider(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.destroyed_ids: list[str] = []
+
+    def destroy(self, deployment_id):
+        self.destroyed_ids.append(str(deployment_id))
 
 
 class DeploymentServiceTest(unittest.TestCase):
@@ -476,6 +485,297 @@ class DeploymentServiceTest(unittest.TestCase):
 
             self.assertEqual(provider.create_calls, 1)
             self.assertEqual(provider.destroy_calls, 1)
+
+    def test_deploy_persists_record_after_create_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app_path = root / "app.json"
+            workflow_path = root / "workflow.json"
+            contract_path = root / "workflow.contract.json"
+
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "demo-contract",
+                        "version": "v1",
+                        "inputs": [{"name": "prompt", "type": "string", "required": True, "node_id": "1"}],
+                        "outputs": [{"name": "image", "type": "image/png", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "demo",
+                        "version": "v1",
+                        "workflow_path": "./workflow.json",
+                        "provider": "runpod",
+                        "gpu_profile": "A10G",
+                        "regions": ["US"],
+                        "env": {},
+                        "endpoint": {
+                            "name": "run",
+                            "mode": "async",
+                            "auth_mode": "api_key",
+                            "timeout_seconds": 300,
+                            "max_payload_mb": 10,
+                        },
+                        "cache_policy": {
+                            "watch_paths": ["/tmp/models"],
+                            "min_file_size_mb": 100,
+                            "symlink_targets": ["/tmp/models"],
+                        },
+                        "build": {"comfy_version": "0.3.26", "plugins": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = DeploymentService(state_dir=root / "state")
+            provider = DeployImageErrorProvider()
+            with mock.patch("comfy_endpoints.runtime.deployment_service.build_provider", return_value=provider):
+                service.image_manager = mock.Mock(
+                    ensure_image=mock.Mock(
+                        return_value=ImageResolution(
+                            image_ref="ghcr.io/comfy-endpoints/golden:test",
+                            image_exists=True,
+                            built=False,
+                        )
+                    )
+                )
+                with self.assertRaises(RuntimeError):
+                    service.deploy(app_path)
+
+            persisted = service.state_store.get("demo")
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual(persisted.deployment_id, "dep-1")
+            self.assertIn("tracked_deployment_ids", persisted.metadata)
+            self.assertIn("dep-1", persisted.metadata["tracked_deployment_ids"])
+
+    def test_deploy_auto_destroys_existing_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app_path = root / "app.json"
+            workflow_path = root / "workflow.json"
+            contract_path = root / "workflow.contract.json"
+
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "demo-contract",
+                        "version": "v1",
+                        "inputs": [{"name": "prompt", "type": "string", "required": True, "node_id": "1"}],
+                        "outputs": [{"name": "image", "type": "image/png", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "demo",
+                        "version": "v1",
+                        "workflow_path": "./workflow.json",
+                        "provider": "runpod",
+                        "gpu_profile": "A10G",
+                        "regions": ["US"],
+                        "env": {},
+                        "endpoint": {
+                            "name": "run",
+                            "mode": "async",
+                            "auth_mode": "api_key",
+                            "timeout_seconds": 300,
+                            "max_payload_mb": 10,
+                        },
+                        "cache_policy": {
+                            "watch_paths": ["/tmp/models"],
+                            "min_file_size_mb": 100,
+                            "symlink_targets": ["/tmp/models"],
+                        },
+                        "build": {"comfy_version": "0.3.26", "plugins": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = DeploymentService(state_dir=root / "state")
+            service.state_store.put(
+                DeploymentRecord(
+                    app_id="demo",
+                    deployment_id="old-primary",
+                    provider=ProviderName.RUNPOD,
+                    state=DeploymentState.BOOTSTRAPPING,
+                    endpoint_url="https://old-primary.example.com",
+                    api_key_ref="secret://demo/api_key",
+                    metadata={"tracked_deployment_ids": ["old-primary", "old-secondary"]},
+                )
+            )
+            provider = TrackingDestroyProvider()
+            with mock.patch("comfy_endpoints.runtime.deployment_service.build_provider", return_value=provider):
+                service.image_manager = mock.Mock(
+                    ensure_image=mock.Mock(
+                        return_value=ImageResolution(
+                            image_ref="ghcr.io/comfy-endpoints/golden:test",
+                            image_exists=True,
+                            built=False,
+                        )
+                    )
+                )
+                service._probe_endpoint = mock.Mock(return_value=(True, "HTTP 200"))
+                record = service.deploy(app_path)
+
+            self.assertEqual(record.deployment_id, "dep-123")
+            self.assertIn("old-primary", provider.destroyed_ids)
+            self.assertIn("old-secondary", provider.destroyed_ids)
+
+    def test_deploy_keep_existing_skips_auto_destroy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app_path = root / "app.json"
+            workflow_path = root / "workflow.json"
+            contract_path = root / "workflow.contract.json"
+
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "demo-contract",
+                        "version": "v1",
+                        "inputs": [{"name": "prompt", "type": "string", "required": True, "node_id": "1"}],
+                        "outputs": [{"name": "image", "type": "image/png", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "demo",
+                        "version": "v1",
+                        "workflow_path": "./workflow.json",
+                        "provider": "runpod",
+                        "gpu_profile": "A10G",
+                        "regions": ["US"],
+                        "env": {},
+                        "endpoint": {
+                            "name": "run",
+                            "mode": "async",
+                            "auth_mode": "api_key",
+                            "timeout_seconds": 300,
+                            "max_payload_mb": 10,
+                        },
+                        "cache_policy": {
+                            "watch_paths": ["/tmp/models"],
+                            "min_file_size_mb": 100,
+                            "symlink_targets": ["/tmp/models"],
+                        },
+                        "build": {"comfy_version": "0.3.26", "plugins": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = DeploymentService(state_dir=root / "state")
+            service.state_store.put(
+                DeploymentRecord(
+                    app_id="demo",
+                    deployment_id="old-primary",
+                    provider=ProviderName.RUNPOD,
+                    state=DeploymentState.READY,
+                    endpoint_url="https://old-primary.example.com",
+                    api_key_ref="secret://demo/api_key",
+                    metadata={"tracked_deployment_ids": ["old-primary"]},
+                )
+            )
+            provider = TrackingDestroyProvider()
+            with mock.patch("comfy_endpoints.runtime.deployment_service.build_provider", return_value=provider):
+                service.image_manager = mock.Mock(
+                    ensure_image=mock.Mock(
+                        return_value=ImageResolution(
+                            image_ref="ghcr.io/comfy-endpoints/golden:test",
+                            image_exists=True,
+                            built=False,
+                        )
+                    )
+                )
+                service._probe_endpoint = mock.Mock(return_value=(True, "HTTP 200"))
+                record = service.deploy(app_path, keep_existing=True)
+
+            self.assertEqual(record.deployment_id, "dep-123")
+            self.assertEqual(provider.destroyed_ids, [])
+            self.assertIn("old-primary", record.metadata.get("tracked_deployment_ids", []))
+            self.assertIn("dep-123", record.metadata.get("tracked_deployment_ids", []))
+
+    def test_destroy_uses_tracked_deployment_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app_path = root / "app.json"
+            workflow_path = root / "workflow.json"
+            contract_path = root / "workflow.contract.json"
+
+            workflow_path.write_text(json.dumps(self._workflow_payload()), encoding="utf-8")
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "contract_id": "demo-contract",
+                        "version": "v1",
+                        "inputs": [{"name": "prompt", "type": "string", "required": True, "node_id": "1"}],
+                        "outputs": [{"name": "image", "type": "image/png", "node_id": "9"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "demo",
+                        "version": "v1",
+                        "workflow_path": "./workflow.json",
+                        "provider": "runpod",
+                        "gpu_profile": "A10G",
+                        "regions": ["US"],
+                        "env": {},
+                        "endpoint": {
+                            "name": "run",
+                            "mode": "async",
+                            "auth_mode": "api_key",
+                            "timeout_seconds": 300,
+                            "max_payload_mb": 10,
+                        },
+                        "cache_policy": {
+                            "watch_paths": ["/tmp/models"],
+                            "min_file_size_mb": 100,
+                            "symlink_targets": ["/tmp/models"],
+                        },
+                        "build": {"comfy_version": "0.3.26", "plugins": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = DeploymentService(state_dir=root / "state")
+            service.state_store.put(
+                DeploymentRecord(
+                    app_id="demo",
+                    deployment_id="dep-current",
+                    provider=ProviderName.RUNPOD,
+                    state=DeploymentState.BOOTSTRAPPING,
+                    endpoint_url=None,
+                    api_key_ref="secret://demo/api_key",
+                    metadata={"tracked_deployment_ids": ["dep-old", "dep-current"]},
+                )
+            )
+
+            provider = TrackingDestroyProvider()
+            with mock.patch("comfy_endpoints.runtime.deployment_service.build_provider", return_value=provider):
+                service.destroy(app_path)
+
+            self.assertEqual(provider.destroyed_ids, ["dep-old", "dep-current"])
+            self.assertIsNone(service.state_store.get("demo"))
 
 
 if __name__ == "__main__":
