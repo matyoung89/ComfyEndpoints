@@ -785,7 +785,7 @@ def run_bootstrap(
 
     comfy_command = os.getenv(
         "COMFY_START_COMMAND",
-        "python /opt/comfy/main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --enable-manager --disable-manager-ui",
+        "python /opt/comfy/main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --enable-manager",
     )
 
     gateway_command = (
