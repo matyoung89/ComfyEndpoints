@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -273,14 +274,279 @@ class ApiOutputNode:
         return (json.dumps(output_payload, default=str),)
 
 
+class PathToImageTensorNode:
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+        return {
+            "required": {
+                "path": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "execute"
+    CATEGORY = "ComfyEndpoints/Path"
+
+    @staticmethod
+    def _load_image_array(path: str) -> Any:
+        import numpy as np
+        from PIL import Image
+
+        image_path = Path(path.strip())
+        if not image_path.exists() or not image_path.is_file():
+            raise ValueError(f"Invalid image path: {path}")
+        image = Image.open(image_path).convert("RGB")
+        array_value = np.asarray(image, dtype=np.float32) / 255.0
+        return array_value
+
+    def execute(self, path: str) -> tuple[Any]:
+        import torch
+
+        array_value = self._load_image_array(path)
+        tensor_value = torch.from_numpy(array_value).unsqueeze(0)
+        return (tensor_value,)
+
+
+class PathToVideoTensorNode:
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+        return {
+            "required": {
+                "path": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "max_frames": ("INT", {"default": 0, "min": 0, "max": 1048576}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "FLOAT")
+    RETURN_NAMES = ("frames", "frame_count", "fps")
+    FUNCTION = "execute"
+    CATEGORY = "ComfyEndpoints/Path"
+
+    def execute(self, path: str, max_frames: int = 0) -> tuple[Any, int, float]:
+        import cv2
+        import numpy as np
+        import torch
+
+        video_path = Path(path.strip())
+        if not video_path.exists() or not video_path.is_file():
+            raise ValueError(f"Invalid video path: {path}")
+
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise ValueError(f"Unable to open video: {path}")
+        try:
+            fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            if fps_value <= 0.0:
+                fps_value = 24.0
+            frames: list[Any] = []
+            while True:
+                if max_frames > 0 and len(frames) >= max_frames:
+                    break
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                normalized = rgb_frame.astype(np.float32) / 255.0
+                frames.append(normalized)
+        finally:
+            capture.release()
+
+        if not frames:
+            raise ValueError(f"No frames decoded from video: {path}")
+
+        stacked = np.stack(frames, axis=0)
+        tensor_value = torch.from_numpy(stacked)
+        return (tensor_value, int(tensor_value.shape[0]), float(fps_value))
+
+
+class PathToTensorNode:
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+        return {
+            "required": {
+                "path": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "max_frames": ("INT", {"default": 0, "min": 0, "max": 1048576}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "INT", "FLOAT")
+    RETURN_NAMES = ("tensor", "media_kind", "frame_count", "fps")
+    FUNCTION = "execute"
+    CATEGORY = "ComfyEndpoints/Path"
+
+    def execute(self, path: str, max_frames: int = 0) -> tuple[Any, str, int, float]:
+        normalized_suffix = Path(path.strip()).suffix.lower()
+        video_suffixes = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+        if normalized_suffix in video_suffixes:
+            frames, frame_count, fps_value = PathToVideoTensorNode().execute(path=path, max_frames=max_frames)
+            return (frames, "video", frame_count, fps_value)
+        image_tensor = PathToImageTensorNode().execute(path=path)[0]
+        return (image_tensor, "image", 1, 0.0)
+
+
+class ImageTensorToPathNode:
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            },
+            "optional": {
+                "path": ("STRING", {"default": ""}),
+                "format": ("STRING", {"default": "png"}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("path",)
+    FUNCTION = "execute"
+    CATEGORY = "ComfyEndpoints/Path"
+
+    @staticmethod
+    def _to_hwc_uint8(image: Any) -> Any:
+        import numpy as np
+
+        array_value = image
+        if isinstance(array_value, (list, tuple)) and array_value:
+            array_value = array_value[0]
+        if hasattr(array_value, "detach"):
+            array_value = array_value.detach().cpu().numpy()
+        array_value = np.asarray(array_value)
+        if array_value.ndim == 4:
+            array_value = array_value[0]
+        if array_value.ndim != 3:
+            raise ValueError("Image tensor must be rank-3 or rank-4")
+        if array_value.dtype != np.uint8:
+            if float(array_value.max()) <= 1.0:
+                array_value = np.clip(array_value, 0.0, 1.0) * 255.0
+            else:
+                array_value = np.clip(array_value, 0.0, 255.0)
+            array_value = array_value.astype(np.uint8)
+        return array_value
+
+    def execute(self, image: Any, path: str = "", format: str = "png") -> tuple[str]:
+        from PIL import Image
+
+        array_value = self._to_hwc_uint8(image)
+        normalized_format = (format or "png").strip().lower()
+        suffix = f".{normalized_format}"
+        if path.strip():
+            output_path = Path(path.strip())
+            if output_path.suffix:
+                suffix = output_path.suffix
+        else:
+            fd, tmp_path = tempfile.mkstemp(prefix="comfy_image_", suffix=suffix)
+            os.close(fd)
+            output_path = Path(tmp_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        channels = int(array_value.shape[2])
+        if channels == 1:
+            image_mode = "L"
+            save_value = array_value[:, :, 0]
+        elif channels == 3:
+            image_mode = "RGB"
+            save_value = array_value
+        elif channels == 4:
+            image_mode = "RGBA"
+            save_value = array_value
+        else:
+            raise ValueError(f"Unsupported image channel count: {channels}")
+        Image.fromarray(save_value, mode=image_mode).save(output_path)
+        return (str(output_path),)
+
+
+class VideoTensorToPathNode:
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+            },
+            "optional": {
+                "path": ("STRING", {"default": ""}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("path",)
+    FUNCTION = "execute"
+    CATEGORY = "ComfyEndpoints/Path"
+
+    @staticmethod
+    def _to_nhwc_uint8(frames: Any) -> Any:
+        import numpy as np
+
+        array_value = frames
+        if hasattr(array_value, "detach"):
+            array_value = array_value.detach().cpu().numpy()
+        array_value = np.asarray(array_value)
+        if array_value.ndim == 3:
+            array_value = array_value[None, ...]
+        if array_value.ndim != 4:
+            raise ValueError("Video frames tensor must be rank-4 or rank-3")
+        if array_value.dtype != np.uint8:
+            if float(array_value.max()) <= 1.0:
+                array_value = np.clip(array_value, 0.0, 1.0) * 255.0
+            else:
+                array_value = np.clip(array_value, 0.0, 255.0)
+            array_value = array_value.astype(np.uint8)
+        return array_value
+
+    def execute(self, frames: Any, path: str = "", fps: float = 24.0) -> tuple[str]:
+        import cv2
+
+        frame_array = self._to_nhwc_uint8(frames)
+        if path.strip():
+            output_path = Path(path.strip())
+        else:
+            fd, tmp_path = tempfile.mkstemp(prefix="comfy_video_", suffix=".mp4")
+            os.close(fd)
+            output_path = Path(tmp_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        frame_height = int(frame_array.shape[1])
+        frame_width = int(frame_array.shape[2])
+        writer = cv2.VideoWriter(
+            str(output_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            float(fps),
+            (frame_width, frame_height),
+        )
+        if not writer.isOpened():
+            raise ValueError(f"Unable to open video writer for path: {output_path}")
+        try:
+            for frame in frame_array:
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                writer.write(bgr_frame)
+        finally:
+            writer.release()
+        return (str(output_path),)
+
+
 NODE_CLASS_MAPPINGS = {
     "ApiInput": ApiInputNode,
     "ApiOutput": ApiOutputNode,
+    "PathToTensor": PathToTensorNode,
+    "PathToImageTensor": PathToImageTensorNode,
+    "PathToVideoTensor": PathToVideoTensorNode,
+    "ImageTensorToPath": ImageTensorToPathNode,
+    "VideoTensorToPath": VideoTensorToPathNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ApiInput": "ComfyEndpoints API Input",
     "ApiOutput": "ComfyEndpoints API Output",
+    "PathToTensor": "Path To Tensor",
+    "PathToImageTensor": "Path To Image Tensor",
+    "PathToVideoTensor": "Path To Video Tensor",
+    "ImageTensorToPath": "Image Tensor To Path",
+    "VideoTensorToPath": "Video Tensor To Path",
 }
 
 

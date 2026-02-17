@@ -19,20 +19,118 @@
       }
     },
     "3": {
-      "class_type": "Wan22Animate",
+      "class_type": "PathToImageTensor",
       "inputs": {
-        "reference_image_path": [
+        "path": [
           "1",
           0
-        ],
-        "driving_video_path": [
+        ]
+      }
+    },
+    "4": {
+      "class_type": "PathToVideoTensor",
+      "inputs": {
+        "path": [
           "2",
           0
         ],
-        "motion_strength": 1.0,
-        "seed": 1000001,
+        "max_frames": 0
+      }
+    },
+    "5": {
+      "class_type": "WanVideoVAELoader",
+      "inputs": {
+        "model_name": "wanvideo/Wan2_1_VAE_bf16.safetensors",
+        "precision": "bf16"
+      }
+    },
+    "6": {
+      "class_type": "WanVideoModelLoader",
+      "inputs": {
+        "model": "WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+        "base_precision": "fp16_fast",
+        "quantization": "disabled",
+        "load_device": "offload_device",
+        "attention_mode": "sdpa"
+      }
+    },
+    "7": {
+      "class_type": "WanVideoAnimateEmbeds",
+      "inputs": {
+        "vae": [
+          "5",
+          0
+        ],
+        "width": 832,
+        "height": 480,
+        "num_frames": 81,
+        "force_offload": false,
+        "frame_window_size": 77,
+        "colormatch": "disabled",
+        "pose_strength": 1.0,
+        "face_strength": 1.0,
+        "ref_images": [
+          "3",
+          0
+        ],
+        "pose_images": [
+          "4",
+          0
+        ],
+        "face_images": [
+          "4",
+          0
+        ]
+      }
+    },
+    "8": {
+      "class_type": "WanVideoSampler",
+      "inputs": {
+        "model": [
+          "6",
+          0
+        ],
+        "image_embeds": [
+          "7",
+          0
+        ],
         "steps": 30,
-        "fps": 24
+        "cfg": 6.0,
+        "shift": 5.0,
+        "seed": 1000001,
+        "force_offload": true,
+        "scheduler": "unipc",
+        "riflex_freq_index": 0
+      }
+    },
+    "10": {
+      "class_type": "WanVideoDecode",
+      "inputs": {
+        "vae": [
+          "5",
+          0
+        ],
+        "samples": [
+          "8",
+          0
+        ],
+        "enable_vae_tiling": false,
+        "tile_x": 272,
+        "tile_y": 272,
+        "tile_stride_x": 144,
+        "tile_stride_y": 128,
+        "normalization": "default"
+      }
+    },
+    "11": {
+      "class_type": "VideoTensorToPath",
+      "inputs": {
+        "frames": [
+          "10",
+          0
+        ],
+        "path": "",
+        "fps": 24.0
       }
     },
     "9": {
@@ -41,7 +139,7 @@
         "name": "output_video",
         "type": "video/mp4",
         "value": [
-          "3",
+          "11",
           0
         ]
       }

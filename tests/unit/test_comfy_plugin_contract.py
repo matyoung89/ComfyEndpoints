@@ -36,6 +36,14 @@ class ComfyPluginContractTest(unittest.TestCase):
         self.assertIn("image", input_types["optional"])
         self.assertEqual(input_types["optional"]["image"][0], "IMAGE")
 
+    def test_path_tensor_nodes_are_registered(self) -> None:
+        module = self._load_module()
+        self.assertIn("PathToTensor", module.NODE_CLASS_MAPPINGS)
+        self.assertIn("PathToImageTensor", module.NODE_CLASS_MAPPINGS)
+        self.assertIn("PathToVideoTensor", module.NODE_CLASS_MAPPINGS)
+        self.assertIn("ImageTensorToPath", module.NODE_CLASS_MAPPINGS)
+        self.assertIn("VideoTensorToPath", module.NODE_CLASS_MAPPINGS)
+
     def test_export_contract_rejects_duplicate_output_names(self) -> None:
         module = self._load_module()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -151,6 +159,31 @@ class ComfyPluginContractTest(unittest.TestCase):
             self.assertEqual(record.media_type, "video/mp4")
             self.assertEqual(record.source, "generated")
             self.assertEqual(record.app_id, "demo")
+
+    def test_path_to_image_tensor_and_back_roundtrip(self) -> None:
+        module = self._load_module()
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            input_image_path = root / "in.png"
+            output_image_path = root / "out.png"
+
+            image = Image.new("RGB", (8, 8), color=(10, 120, 200))
+            image.save(input_image_path)
+
+            to_tensor = module.NODE_CLASS_MAPPINGS["PathToImageTensor"]()
+            tensor_value = to_tensor.execute(path=str(input_image_path))[0]
+            self.assertEqual(int(tensor_value.shape[0]), 1)
+            self.assertEqual(int(tensor_value.shape[1]), 8)
+            self.assertEqual(int(tensor_value.shape[2]), 8)
+            self.assertEqual(int(tensor_value.shape[3]), 3)
+
+            to_path = module.NODE_CLASS_MAPPINGS["ImageTensorToPath"]()
+            saved_path = to_path.execute(image=tensor_value, path=str(output_image_path), format="png")[0]
+            self.assertTrue(Path(saved_path).exists())
+            saved_image = Image.open(saved_path)
+            self.assertEqual(saved_image.size, (8, 8))
 
 
 if __name__ == "__main__":
