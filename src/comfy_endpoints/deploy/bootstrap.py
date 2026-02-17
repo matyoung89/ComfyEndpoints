@@ -149,6 +149,10 @@ NODE_CLASS_REPO_OVERRIDES = {
 NODE_CLASS_PIP_OVERRIDES = {
     "Wan22Animate": ["accelerate"],
 }
+NODE_CLASS_INPUT_MODEL_DIR_OVERRIDES = {
+    ("WanVideoModelLoader", "model"): "diffusion_models",
+    ("WanVideoVAELoader", "model_name"): "vae",
+}
 MODEL_SUBDIRS = {
     "checkpoints",
     "diffusion_models",
@@ -163,6 +167,7 @@ MODEL_SUBDIRS = {
 class MissingModelRequirement:
     input_name: str
     filename: str
+    class_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -192,7 +197,7 @@ def _missing_models_from_preflight_error(exc: ComfyClientError) -> list[MissingM
             if key in seen:
                 continue
             seen.add(key)
-            parsed.append(MissingModelRequirement(input_name=input_name, filename=filename))
+            parsed.append(MissingModelRequirement(class_type=None, input_name=input_name, filename=filename))
     return parsed
 
 
@@ -281,11 +286,13 @@ def _missing_models_from_object_info(
             if value in options:
                 continue
 
-            key = (input_name, value)
+            key = (class_type, input_name, value)
             if key in seen:
                 continue
             seen.add(key)
-            parsed.append(MissingModelRequirement(input_name=input_name, filename=value))
+            parsed.append(
+                MissingModelRequirement(class_type=class_type, input_name=input_name, filename=value)
+            )
 
     return parsed
 
@@ -300,21 +307,27 @@ def _known_model_requirements_from_prompt(prompt_payload: dict) -> list[MissingM
     for node in prompt.values():
         if not isinstance(node, dict):
             continue
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str) or not class_type:
+            continue
         inputs = node.get("inputs")
         if not isinstance(inputs, dict):
             continue
 
         for input_name, value in inputs.items():
-            if input_name not in MODEL_DIR_BY_INPUT_NAME:
+            override_key = (class_type, input_name)
+            if input_name not in MODEL_DIR_BY_INPUT_NAME and override_key not in NODE_CLASS_INPUT_MODEL_DIR_OVERRIDES:
                 continue
             if not isinstance(value, str) or not value.strip():
                 continue
             filename = value.strip()
-            key = (input_name, filename)
+            key = (class_type, input_name, filename)
             if key in seen:
                 continue
             seen.add(key)
-            parsed.append(MissingModelRequirement(input_name=input_name, filename=filename))
+            parsed.append(
+                MissingModelRequirement(class_type=class_type, input_name=input_name, filename=filename)
+            )
 
     return parsed
 
@@ -713,6 +726,10 @@ def _install_missing_custom_nodes(
 
 
 def _target_model_dir(requirement: MissingModelRequirement, external_type: str) -> str:
+    if requirement.class_type:
+        override_key = (requirement.class_type, requirement.input_name)
+        if override_key in NODE_CLASS_INPUT_MODEL_DIR_OVERRIDES:
+            return NODE_CLASS_INPUT_MODEL_DIR_OVERRIDES[override_key]
     if requirement.input_name in MODEL_DIR_BY_INPUT_NAME:
         return MODEL_DIR_BY_INPUT_NAME[requirement.input_name]
     if external_type in MODEL_DIR_BY_TYPE:
@@ -741,6 +758,24 @@ def _download_file(url: str, target_path: Path) -> None:
                     break
                 out.write(chunk)
     tmp_path.replace(target_path)
+
+
+def _catalog_filename_candidates(value: str) -> set[str]:
+    trimmed = value.strip().replace("\\", "/")
+    if not trimmed:
+        return set()
+    candidates = {trimmed}
+    candidates.add(Path(trimmed).name)
+    return {candidate for candidate in candidates if candidate}
+
+
+def _resolve_model_target_relative_path(requirement_filename: str, catalog_filename: str) -> Path:
+    preferred = requirement_filename.strip().replace("\\", "/")
+    candidate = preferred if preferred else catalog_filename.strip().replace("\\", "/")
+    relative_path = Path(candidate)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return Path(Path(catalog_filename).name)
+    return relative_path
 
 
 def _fetch_manager_default_model_list() -> object:
@@ -795,9 +830,11 @@ def _install_missing_models(
 
     installed_count = 0
     for requirement in requirements:
+        requirement_candidates = _catalog_filename_candidates(requirement.filename)
         selected = None
         for item in entries:
-            if item["filename"] == requirement.filename:
+            item_candidates = _catalog_filename_candidates(item["filename"])
+            if requirement_candidates.intersection(item_candidates):
                 selected = item
                 break
         if not selected:
@@ -808,7 +845,11 @@ def _install_missing_models(
             continue
 
         model_dir = _target_model_dir(requirement, selected.get("type", ""))
-        target_path = cache_models_root / model_dir / requirement.filename
+        relative_path = _resolve_model_target_relative_path(
+            requirement_filename=requirement.filename,
+            catalog_filename=selected["filename"],
+        )
+        target_path = cache_models_root / model_dir / relative_path
         if target_path.exists():
             continue
 
@@ -1019,11 +1060,11 @@ def run_bootstrap(
 
                 known_requirements = _known_model_requirements_from_prompt(preflight_payload)
                 if known_requirements:
-                    dedup: dict[tuple[str, str], MissingModelRequirement] = {
-                        (item.input_name, item.filename): item for item in missing_models
+                    dedup: dict[tuple[str | None, str, str], MissingModelRequirement] = {
+                        (item.class_type, item.input_name, item.filename): item for item in missing_models
                     }
                     for item in known_requirements:
-                        dedup.setdefault((item.input_name, item.filename), item)
+                        dedup.setdefault((item.class_type, item.input_name, item.filename), item)
                     missing_models = list(dedup.values())
                 if missing_models:
                     print(

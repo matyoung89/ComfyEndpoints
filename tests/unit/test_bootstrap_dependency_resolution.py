@@ -159,6 +159,45 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
             self.assertEqual(count, 1)
             mocked_download.assert_called_once()
 
+    def test_install_missing_models_matches_by_basename_and_keeps_prompt_subpath(self) -> None:
+        class FakeComfyClient:
+            def get_external_models(self):
+                return {
+                    "models": [
+                        {
+                            "filename": "Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                            "url": "https://example.com/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                            "type": "diffusion_models",
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            requirements = [
+                MissingModelRequirement(
+                    input_name="model",
+                    filename="WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                )
+            ]
+            with mock.patch("comfy_endpoints.deploy.bootstrap._download_file") as mocked_download:
+                count = _install_missing_models(FakeComfyClient(), requirements, root / "cache_models")
+
+            self.assertEqual(count, 1)
+            mocked_download.assert_called_once()
+            target_path = mocked_download.call_args.args[1]
+            self.assertEqual(
+                str(target_path),
+                str(
+                    root
+                    / "cache_models"
+                    / "diffusion_models"
+                    / "WanVideo"
+                    / "2_2"
+                    / "Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors"
+                ),
+            )
+
     def test_ensure_model_roots_on_cache_replaces_local_dirs_with_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -219,10 +258,56 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         self.assertEqual(
             parsed,
             [
-                MissingModelRequirement(input_name="unet_name", filename="flux1-schnell.safetensors"),
-                MissingModelRequirement(input_name="clip_name1", filename="clip_l.safetensors"),
-                MissingModelRequirement(input_name="clip_name2", filename="t5xxl_fp8_e4m3fn.safetensors"),
-                MissingModelRequirement(input_name="vae_name", filename="ae.safetensors"),
+                MissingModelRequirement(
+                    input_name="unet_name",
+                    filename="flux1-schnell.safetensors",
+                    class_type="UNETLoader",
+                ),
+                MissingModelRequirement(
+                    input_name="clip_name1",
+                    filename="clip_l.safetensors",
+                    class_type="DualCLIPLoader",
+                ),
+                MissingModelRequirement(
+                    input_name="clip_name2",
+                    filename="t5xxl_fp8_e4m3fn.safetensors",
+                    class_type="DualCLIPLoader",
+                ),
+                MissingModelRequirement(
+                    input_name="vae_name",
+                    filename="ae.safetensors",
+                    class_type="VAELoader",
+                ),
+            ],
+        )
+
+    def test_known_model_requirements_from_prompt_includes_wan_loader_inputs(self) -> None:
+        prompt_payload = {
+            "prompt": {
+                "5": {
+                    "class_type": "WanVideoVAELoader",
+                    "inputs": {"model_name": "wanvideo/Wan2_1_VAE_bf16.safetensors"},
+                },
+                "6": {
+                    "class_type": "WanVideoModelLoader",
+                    "inputs": {"model": "WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors"},
+                },
+            }
+        }
+        parsed = _known_model_requirements_from_prompt(prompt_payload)
+        self.assertEqual(
+            parsed,
+            [
+                MissingModelRequirement(
+                    input_name="model_name",
+                    filename="wanvideo/Wan2_1_VAE_bf16.safetensors",
+                    class_type="WanVideoVAELoader",
+                ),
+                MissingModelRequirement(
+                    input_name="model",
+                    filename="WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                    class_type="WanVideoModelLoader",
+                ),
             ],
         )
 
@@ -247,10 +332,26 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         self.assertEqual(
             parsed,
             [
-                MissingModelRequirement(input_name="unet_name", filename="flux1-schnell.safetensors"),
-                MissingModelRequirement(input_name="clip_name1", filename="clip_l.safetensors"),
-                MissingModelRequirement(input_name="clip_name2", filename="t5xxl_fp8_e4m3fn.safetensors"),
-                MissingModelRequirement(input_name="vae_name", filename="ae.safetensors"),
+                MissingModelRequirement(
+                    input_name="unet_name",
+                    filename="flux1-schnell.safetensors",
+                    class_type="UNETLoader",
+                ),
+                MissingModelRequirement(
+                    input_name="clip_name1",
+                    filename="clip_l.safetensors",
+                    class_type="DualCLIPLoader",
+                ),
+                MissingModelRequirement(
+                    input_name="clip_name2",
+                    filename="t5xxl_fp8_e4m3fn.safetensors",
+                    class_type="DualCLIPLoader",
+                ),
+                MissingModelRequirement(
+                    input_name="vae_name",
+                    filename="ae.safetensors",
+                    class_type="VAELoader",
+                ),
             ],
         )
 
