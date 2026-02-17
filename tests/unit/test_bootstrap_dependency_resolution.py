@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,13 +20,50 @@ from comfy_endpoints.deploy.bootstrap import (
     _missing_nodes_from_object_info,
     _missing_nodes_from_preflight_error,
     _known_model_requirements_from_prompt,
+    _log_manager_endpoint_probes,
     _missing_models_from_object_info,
     _missing_models_from_preflight_error,
+    _probe_manager_endpoint_status,
 )
 from comfy_endpoints.gateway.comfy_client import ComfyClientError
 
 
 class BootstrapDependencyResolutionTest(unittest.TestCase):
+    def test_probe_manager_endpoint_status_reports_http_code(self) -> None:
+        class _StatusResponse:
+            def __init__(self, status: int):
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                _ = (exc_type, exc, tb)
+                return False
+
+        with mock.patch("urllib.request.urlopen", return_value=_StatusResponse(200)):
+            status = _probe_manager_endpoint_status("http://127.0.0.1:8188", "/customnode/getlist")
+        self.assertEqual(status, "HTTP 200")
+
+    def test_log_manager_endpoint_probes_logs_each_path(self) -> None:
+        def _raise_404(_request, timeout=10):  # noqa: ARG001
+            raise urllib.error.HTTPError(
+                url="http://127.0.0.1:8188/customnode/getlist",
+                code=404,
+                msg="Not Found",
+                hdrs=None,
+                fp=None,
+            )
+
+        with mock.patch("urllib.request.urlopen", side_effect=_raise_404):
+            with mock.patch("sys.stderr") as mocked_stderr:
+                _log_manager_endpoint_probes("http://127.0.0.1:8188")
+
+        joined = "".join(str(call.args[0]) for call in mocked_stderr.write.call_args_list)
+        self.assertIn("/customnode/getmappings?mode=default", joined)
+        self.assertIn("/customnode/getlist?mode=default&skip_update=true", joined)
+        self.assertIn("/externalmodel/getlist?mode=default", joined)
+
     def test_missing_models_parse_from_error_text(self) -> None:
         exc = ComfyClientError(
             "error",

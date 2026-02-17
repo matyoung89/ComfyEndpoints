@@ -78,6 +78,33 @@ def wait_for_comfy_ready(comfy_url: str, timeout_seconds: int = 180) -> None:
     raise RuntimeError(f"Comfy startup timeout waiting for readiness: {last_error}")
 
 
+def _probe_manager_endpoint_status(comfy_url: str, path: str) -> str:
+    request = urllib.request.Request(
+        f"{comfy_url.rstrip('/')}{path}",
+        headers={"accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code}"
+    except urllib.error.URLError as exc:
+        reason = str(exc.reason) if exc.reason else "connection error"
+        return f"URL error: {reason}"
+
+
+def _log_manager_endpoint_probes(comfy_url: str) -> None:
+    probe_paths = (
+        "/customnode/getmappings?mode=default",
+        "/customnode/getlist?mode=default&skip_update=true",
+        "/externalmodel/getlist?mode=default",
+    )
+    for path in probe_paths:
+        status = _probe_manager_endpoint_status(comfy_url, path)
+        print(f"[bootstrap] manager endpoint probe {path} -> {status}", file=sys.stderr)
+
+
 MISSING_MODEL_PATTERN = re.compile(
     r"Value not in list:\s*(?P<input_name>[A-Za-z0-9_]+)\s*:\s*'(?P<filename>[^']+)'",
 )
@@ -815,9 +842,11 @@ def run_bootstrap(
     signal.signal(signal.SIGTERM, shutdown)
 
     try:
-        wait_for_comfy_ready("http://127.0.0.1:8188")
+        comfy_url = "http://127.0.0.1:8188"
+        wait_for_comfy_ready(comfy_url)
+        _log_manager_endpoint_probes(comfy_url)
         preflight_payload = build_preflight_payload(workflow_payload, contract)
-        comfy_client = ComfyClient("http://127.0.0.1:8188")
+        comfy_client = ComfyClient(comfy_url)
         max_preflight_attempts = int(os.getenv("COMFY_ENDPOINTS_PREFLIGHT_MAX_ATTEMPTS", "8"))
         object_info_payload: dict | None = None
         for attempt in range(1, max_preflight_attempts + 1):
@@ -862,8 +891,9 @@ def run_bootstrap(
                         except subprocess.TimeoutExpired:
                             comfy_process.kill()
                     comfy_process = start_comfy_process()
-                    wait_for_comfy_ready("http://127.0.0.1:8188")
-                    comfy_client = ComfyClient("http://127.0.0.1:8188")
+                    wait_for_comfy_ready(comfy_url)
+                    _log_manager_endpoint_probes(comfy_url)
+                    comfy_client = ComfyClient(comfy_url)
                     object_info_payload = None
                     print(
                         f"[bootstrap] preflight retry attempt={attempt + 1} after installing "
