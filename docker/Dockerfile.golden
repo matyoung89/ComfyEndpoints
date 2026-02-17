@@ -5,6 +5,10 @@ ARG COMFY_PLUGINS_JSON=[]
 ENV PYTHONUNBUFFERED=1
 WORKDIR /opt/comfy_endpoints
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libxcb1 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY . /opt/comfy_endpoints
 RUN pip install --no-cache-dir -e .
 RUN mkdir -p /opt/comfy/custom_nodes \
