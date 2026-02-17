@@ -309,7 +309,7 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
             requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
         )
         self.assertEqual(count, 1)
-        self.assertEqual(client.installs, ["https://github.com/example/custom-wan-node"])
+        self.assertEqual(client.installs, ["https://github.com/kijai/ComfyUI-WanVideoWrapper"])
 
     def test_install_missing_custom_nodes_uses_override_when_catalog_missing(self) -> None:
         class FakeComfyClient:
@@ -330,6 +330,31 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         count = _install_missing_custom_nodes(
             comfy_client=client,
             requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(client.installs, ["https://github.com/kijai/ComfyUI-WanVideoWrapper"])
+
+    def test_install_missing_custom_nodes_prefers_override_over_catalog_match(self) -> None:
+        class FakeComfyClient:
+            def __init__(self):
+                self.installs = []
+
+            def get_custom_node_mappings(self):
+                return {
+                    "https://github.com/LeonQ8/ComfyUI-Dynamic-Lora-Scheduler": [["WanVideoVAELoader"]],
+                }
+
+            def get_custom_node_list(self):
+                return {}
+
+            def install_custom_node_by_git_url(self, git_url: str):
+                self.installs.append(git_url)
+                return "ok"
+
+        client = FakeComfyClient()
+        count = _install_missing_custom_nodes(
+            comfy_client=client,
+            requirements=[MissingNodeRequirement(class_type="WanVideoVAELoader")],
         )
         self.assertEqual(count, 1)
         self.assertEqual(client.installs, ["https://github.com/kijai/ComfyUI-WanVideoWrapper"])
@@ -363,8 +388,8 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
                         requirements=[MissingNodeRequirement(class_type="Wan22Animate")],
                     )
         self.assertEqual(count, 1)
-        mocked_clone.assert_called_once_with("https://github.com/example/custom-wan-node")
-        mocked_deps.assert_called_once_with("https://github.com/example/custom-wan-node")
+        mocked_clone.assert_called_once_with("https://github.com/kijai/ComfyUI-WanVideoWrapper")
+        mocked_deps.assert_called_once_with("https://github.com/kijai/ComfyUI-WanVideoWrapper")
         mocked_override_pkgs.assert_called_once_with("Wan22Animate")
 
     def test_package_id_mapping_resolves_repo_urls(self) -> None:

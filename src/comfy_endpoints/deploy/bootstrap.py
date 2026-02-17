@@ -139,6 +139,11 @@ MODEL_DIR_BY_TYPE = {
 
 NODE_CLASS_REPO_OVERRIDES = {
     "Wan22Animate": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
+    "WanVideoVAELoader": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
+    "WanVideoModelLoader": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
+    "WanVideoAnimateEmbeds": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
+    "WanVideoSampler": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
+    "WanVideoDecode": ["https://github.com/kijai/ComfyUI-WanVideoWrapper"],
 }
 
 NODE_CLASS_PIP_OVERRIDES = {
@@ -648,9 +653,8 @@ def _install_missing_custom_nodes(
         if not candidate_urls:
             package_ids = _find_package_ids_for_node_class(requirement.class_type, mapping_payload)
             candidate_urls.update(_find_repo_urls_for_package_ids(package_ids, list_payload))
-        if not candidate_urls:
-            candidate_urls.update(NODE_CLASS_REPO_OVERRIDES.get(requirement.class_type, []))
-        if not candidate_urls:
+        preferred_urls = NODE_CLASS_REPO_OVERRIDES.get(requirement.class_type, [])
+        if not candidate_urls and not preferred_urls:
             print(
                 f"[bootstrap] no catalog match for required node class_type={requirement.class_type}",
                 file=sys.stderr,
@@ -658,7 +662,12 @@ def _install_missing_custom_nodes(
             continue
 
         installed = False
-        for repo_url in sorted(candidate_urls):
+        ordered_candidate_urls = [*preferred_urls]
+        ordered_candidate_urls.extend(
+            sorted(url for url in candidate_urls if url not in set(preferred_urls))
+        )
+
+        for repo_url in ordered_candidate_urls:
             if repo_url in attempted_repo_urls:
                 continue
             attempted_repo_urls.add(repo_url)
