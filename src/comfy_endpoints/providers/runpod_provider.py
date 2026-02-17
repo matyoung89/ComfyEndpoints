@@ -533,7 +533,13 @@ class RunpodProvider(CloudProviderAdapter):
             self._rest_request("POST", f"/pods/{deployment_id}/stop")
         except RunpodError:
             pass
-        self._rest_request("DELETE", f"/pods/{deployment_id}")
+        delete_response = self._rest_request(
+            "DELETE",
+            f"/pods/{deployment_id}",
+            suppress_http_errors=(404,),
+        )
+        if isinstance(delete_response, dict) and "_suppressed_http_error" in delete_response:
+            return
 
     def get_logs(self, deployment_id: str, tail_lines: int = 200) -> str:
         logs_response = self._rest_request(

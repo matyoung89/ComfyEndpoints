@@ -216,6 +216,26 @@ class RunpodProviderApiTest(unittest.TestCase):
             logs = provider.get_logs("pod-1", tail_lines=100)
         self.assertIn("/opt/comfy/main.py", logs)
 
+    def test_destroy_ignores_missing_pod_404(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(provider, "_rest_request") as mocked_rest:
+            mocked_rest.side_effect = [
+                {},
+                {"_suppressed_http_error": 404, "_detail": "pod not found"},
+            ]
+            provider.destroy("pod-1")
+
+        self.assertEqual(mocked_rest.call_args_list[0].args[0], "POST")
+        self.assertEqual(mocked_rest.call_args_list[1].args[0], "DELETE")
+        self.assertEqual(mocked_rest.call_args_list[1].kwargs["suppress_http_errors"], (404,))
+
+    def test_destroy_raises_when_delete_fails_non_404(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(provider, "_rest_request") as mocked_rest:
+            mocked_rest.side_effect = [None, RuntimeError("boom")]
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                provider.destroy("pod-1")
+
 
 if __name__ == "__main__":
     unittest.main()
