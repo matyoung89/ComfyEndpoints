@@ -14,12 +14,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from comfy_endpoints.contracts.validators import parse_workflow_contract
 from comfy_endpoints.deploy.cache_manager import CacheManager
 from comfy_endpoints.gateway.comfy_client import ComfyClient, ComfyClientError
 from comfy_endpoints.gateway.prompt_mapper import build_preflight_payload
+from comfy_endpoints.models import ArtifactSourceSpec
 
 
 def _split_csv(raw: str) -> list[str]:
@@ -173,6 +176,71 @@ class MissingModelRequirement:
 @dataclass(slots=True)
 class MissingNodeRequirement:
     class_type: str
+
+
+def _required_nodes_from_prompt(prompt_payload: dict) -> list[MissingNodeRequirement]:
+    prompt = prompt_payload.get("prompt")
+    if not isinstance(prompt, dict):
+        return []
+    required: list[MissingNodeRequirement] = []
+    seen: set[str] = set()
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str) or not class_type:
+            continue
+        if class_type in seen:
+            continue
+        seen.add(class_type)
+        required.append(MissingNodeRequirement(class_type=class_type))
+    return required
+
+
+def _json_error_payload(stage: str, message: str, details: dict | None = None) -> dict:
+    payload = {
+        "status": "artifact_resolver_failed",
+        "stage": stage,
+        "message": message,
+    }
+    if details:
+        payload["details"] = details
+    return payload
+
+
+def _load_app_artifact_specs_from_env() -> list[ArtifactSourceSpec]:
+    raw = os.getenv("COMFY_ENDPOINTS_APP_ARTIFACTS_JSON", "").strip()
+    if not raw:
+        return []
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise RuntimeError("COMFY_ENDPOINTS_APP_ARTIFACTS_JSON must be a JSON array")
+    specs: list[ArtifactSourceSpec] = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"artifact entry at index {index} must be an object")
+        specs.append(
+            ArtifactSourceSpec(
+                match=str(item.get("match", "")).strip(),
+                source_url=str(item.get("source_url", "")).strip(),
+                target_subdir=str(item.get("target_subdir", "")).strip(),
+                target_path=str(item.get("target_path", "")).strip(),
+                kind=str(item.get("kind", "model")).strip() or "model",
+                ref=str(item.get("ref", "")).strip() or None,
+                provides=[
+                    str(value).strip()
+                    for value in (item.get("provides", []) if isinstance(item.get("provides", []), list) else [])
+                    if str(value).strip()
+                ],
+            )
+        )
+    return specs
+
+
+def _artifact_candidates_from_spec(item: ArtifactSourceSpec) -> set[str]:
+    candidates = _catalog_filename_candidates(item.match)
+    candidates.update(_catalog_filename_candidates(item.target_path))
+    return {value for value in candidates if value}
 
 
 def _missing_models_from_preflight_error(exc: ComfyClientError) -> list[MissingModelRequirement]:
@@ -725,6 +793,131 @@ def _install_missing_custom_nodes(
     return installed_count
 
 
+def _install_missing_custom_nodes_from_catalog(
+    requirements: list[MissingNodeRequirement],
+    mapping_payload: object,
+    list_payload: object,
+) -> int:
+    if not requirements:
+        return 0
+
+    installed_count = 0
+    attempted_repo_urls: set[str] = set()
+    for requirement in requirements:
+        candidate_urls = _find_repo_urls_for_node_class(requirement.class_type, mapping_payload)
+        candidate_urls.update(_find_repo_urls_for_node_class(requirement.class_type, list_payload))
+        if not candidate_urls:
+            package_ids = _find_package_ids_for_node_class(requirement.class_type, mapping_payload)
+            candidate_urls.update(_find_repo_urls_for_package_ids(package_ids, list_payload))
+        preferred_urls = NODE_CLASS_REPO_OVERRIDES.get(requirement.class_type, [])
+        if not candidate_urls and not preferred_urls:
+            continue
+
+        ordered_candidate_urls = [*preferred_urls]
+        ordered_candidate_urls.extend(
+            sorted(url for url in candidate_urls if url not in set(preferred_urls))
+        )
+
+        for repo_url in ordered_candidate_urls:
+            if repo_url in attempted_repo_urls:
+                continue
+            attempted_repo_urls.add(repo_url)
+            try:
+                if _install_custom_node_by_git_clone(repo_url):
+                    _install_custom_node_python_dependencies(repo_url)
+                    _install_custom_node_override_packages(requirement.class_type)
+                    installed_count += 1
+                    print(
+                        f"[bootstrap] prestart installed custom node class_type={requirement.class_type} repo={repo_url}",
+                        file=sys.stderr,
+                    )
+                    break
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[bootstrap] prestart custom node install failed repo={repo_url}: {exc}",
+                    file=sys.stderr,
+                )
+
+    return installed_count
+
+
+def _is_custom_node_repo_installed(repo_url: str) -> bool:
+    repo_name = _repo_dir_name(repo_url)
+    if not repo_name:
+        return False
+    return (Path("/opt/comfy/custom_nodes") / repo_name).exists()
+
+
+def _resolve_missing_custom_nodes_from_catalog(
+    requirements: list[MissingNodeRequirement],
+    mapping_payload: object,
+    list_payload: object,
+) -> tuple[int, list[dict]]:
+    if not requirements:
+        return 0, []
+
+    installed_count = 0
+    unresolved: list[dict] = []
+    attempted_repo_urls: set[str] = set()
+    for requirement in requirements:
+        candidate_urls = _find_repo_urls_for_node_class(requirement.class_type, mapping_payload)
+        candidate_urls.update(_find_repo_urls_for_node_class(requirement.class_type, list_payload))
+        if not candidate_urls:
+            package_ids = _find_package_ids_for_node_class(requirement.class_type, mapping_payload)
+            candidate_urls.update(_find_repo_urls_for_package_ids(package_ids, list_payload))
+        preferred_urls = NODE_CLASS_REPO_OVERRIDES.get(requirement.class_type, [])
+        ordered_candidate_urls = [*preferred_urls]
+        ordered_candidate_urls.extend(
+            sorted(url for url in candidate_urls if url not in set(preferred_urls))
+        )
+
+        if not ordered_candidate_urls:
+            unresolved.append(
+                {
+                    "class_type": requirement.class_type,
+                    "reason": "no_catalog_match",
+                }
+            )
+            continue
+
+        resolved = False
+        for repo_url in ordered_candidate_urls:
+            if _is_custom_node_repo_installed(repo_url):
+                resolved = True
+                break
+
+            if repo_url in attempted_repo_urls:
+                continue
+            attempted_repo_urls.add(repo_url)
+            try:
+                if _install_custom_node_by_git_clone(repo_url):
+                    _install_custom_node_python_dependencies(repo_url)
+                    _install_custom_node_override_packages(requirement.class_type)
+                    installed_count += 1
+                    resolved = True
+                    print(
+                        f"[bootstrap] prestart installed custom node class_type={requirement.class_type} repo={repo_url}",
+                        file=sys.stderr,
+                    )
+                    break
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[bootstrap] prestart custom node install failed repo={repo_url}: {exc}",
+                    file=sys.stderr,
+                )
+
+        if not resolved:
+            unresolved.append(
+                {
+                    "class_type": requirement.class_type,
+                    "reason": "install_failed",
+                    "candidate_repos": ordered_candidate_urls,
+                }
+            )
+
+    return installed_count, unresolved
+
+
 def _target_model_dir(requirement: MissingModelRequirement, external_type: str) -> str:
     if requirement.class_type:
         override_key = (requirement.class_type, requirement.input_name)
@@ -828,6 +1021,21 @@ def _install_missing_models(
         print("[bootstrap] no model catalog entries available", file=sys.stderr)
         return 0
 
+    return _install_missing_models_from_entries(
+        requirements=requirements,
+        entries=entries,
+        cache_models_root=cache_models_root,
+    )
+
+
+def _install_missing_models_from_entries(
+    requirements: list[MissingModelRequirement],
+    entries: list[dict],
+    cache_models_root: Path,
+) -> int:
+    if not requirements or not entries:
+        return 0
+
     installed_count = 0
     for requirement in requirements:
         requirement_candidates = _catalog_filename_candidates(requirement.filename)
@@ -879,6 +1087,282 @@ def _install_missing_models(
             )
 
     return installed_count
+
+
+def _resolve_missing_models_from_entries(
+    requirements: list[MissingModelRequirement],
+    entries: list[dict],
+    cache_models_root: Path,
+) -> tuple[int, list[dict]]:
+    if not requirements:
+        return 0, []
+    if not entries:
+        unresolved = [
+            {
+                "class_type": requirement.class_type,
+                "input_name": requirement.input_name,
+                "filename": requirement.filename,
+                "reason": "no_model_catalog_entries",
+            }
+            for requirement in requirements
+        ]
+        return 0, unresolved
+
+    installed_count = 0
+    unresolved: list[dict] = []
+    for requirement in requirements:
+        requirement_candidates = _catalog_filename_candidates(requirement.filename)
+        selected = None
+        for item in entries:
+            item_candidates = _catalog_filename_candidates(item["filename"])
+            if requirement_candidates.intersection(item_candidates):
+                selected = item
+                break
+        if not selected:
+            unresolved.append(
+                {
+                    "class_type": requirement.class_type,
+                    "input_name": requirement.input_name,
+                    "filename": requirement.filename,
+                    "reason": "no_catalog_match",
+                }
+            )
+            continue
+
+        model_dir = _target_model_dir(requirement, selected.get("type", ""))
+        relative_path = _resolve_model_target_relative_path(
+            requirement_filename=requirement.filename,
+            catalog_filename=selected["filename"],
+        )
+        target_path = cache_models_root / model_dir / relative_path
+        if target_path.exists():
+            continue
+
+        try:
+            _download_file(selected["url"], target_path)
+            installed_count += 1
+            print(
+                f"[bootstrap] prestart installed model filename={requirement.filename} into {model_dir}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            unresolved.append(
+                {
+                    "class_type": requirement.class_type,
+                    "input_name": requirement.input_name,
+                    "filename": requirement.filename,
+                    "reason": "download_failed",
+                    "error": str(exc),
+                }
+            )
+
+    return installed_count, unresolved
+
+
+def _prestart_resolve_artifacts_or_error(
+    preflight_payload: dict,
+    cache_models_root: Path,
+) -> dict | None:
+    try:
+        artifact_specs = _load_app_artifact_specs_from_env()
+    except Exception as exc:  # noqa: BLE001
+        return _json_error_payload(
+            stage="artifact_config",
+            message="Failed to parse app artifact configuration",
+            details={"error": str(exc)},
+        )
+
+    if not artifact_specs:
+        return None
+
+    custom_node_specs = [item for item in artifact_specs if item.kind == "custom_node"]
+    model_specs = [item for item in artifact_specs if item.kind != "custom_node"]
+
+    unresolved_custom_nodes: list[dict] = []
+    for spec in custom_node_specs:
+        repo_url = spec.source_url
+        repo_name = spec.target_path.strip() or _repo_dir_name(repo_url)
+        node_dir = Path("/opt/comfy/custom_nodes") / repo_name
+        if node_dir.exists():
+            continue
+        try:
+            if _install_custom_node_by_git_clone(repo_url, ref=spec.ref or "main"):
+                _install_custom_node_python_dependencies(repo_url)
+                print(
+                    f"[bootstrap] prestart installed custom node repo={repo_url}",
+                    file=sys.stderr,
+                )
+            if not node_dir.exists():
+                unresolved_custom_nodes.append(
+                    {
+                        "kind": "custom_node",
+                        "source_url": repo_url,
+                        "reason": "missing_after_install",
+                        "expected_path": str(node_dir),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            unresolved_custom_nodes.append(
+                {
+                    "kind": "custom_node",
+                    "source_url": repo_url,
+                    "reason": "install_failed",
+                    "error": str(exc),
+                }
+            )
+    if unresolved_custom_nodes:
+        return _json_error_payload(
+            stage="custom_node_resolution",
+            message="Failed to resolve required custom node artifacts before startup",
+            details={"unresolved_custom_nodes": unresolved_custom_nodes},
+        )
+
+    known_model_requirements = _known_model_requirements_from_prompt(preflight_payload)
+    unresolved_models: list[dict] = []
+    resolved_items: list[tuple[MissingModelRequirement, ArtifactSourceSpec]] = []
+    for requirement in known_model_requirements:
+        requirement_candidates = _catalog_filename_candidates(requirement.filename)
+        selected = None
+        for spec in model_specs:
+            if requirement_candidates.intersection(_artifact_candidates_from_spec(spec)):
+                selected = spec
+                break
+        if not selected:
+            unresolved_models.append(
+                {
+                    "class_type": requirement.class_type,
+                    "input_name": requirement.input_name,
+                    "filename": requirement.filename,
+                    "reason": "required_model_not_declared_in_app_artifacts",
+                }
+            )
+            continue
+        resolved_items.append((requirement, selected))
+
+    source_failures: list[dict] = []
+    installed_count = 0
+    for requirement, spec in resolved_items:
+        target_path = cache_models_root / spec.target_subdir / spec.target_path
+        if target_path.exists():
+            continue
+        try:
+            _download_file(spec.source_url, target_path)
+            installed_count += 1
+            print(
+                f"[bootstrap] prestart installed model filename={requirement.filename} into {spec.target_subdir}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            source_failures.append(
+                {
+                    "class_type": requirement.class_type,
+                    "input_name": requirement.input_name,
+                    "filename": requirement.filename,
+                    "source_url": spec.source_url,
+                    "reason": "download_failed",
+                    "error": str(exc),
+                }
+            )
+
+    if source_failures:
+        unresolved_models.extend(source_failures)
+
+    for spec in model_specs:
+        target_path = cache_models_root / spec.target_subdir / spec.target_path
+        if not target_path.exists():
+            unresolved_models.append(
+                {
+                    "kind": "model",
+                    "match": spec.match,
+                    "source_url": spec.source_url,
+                    "reason": "missing_on_disk_after_resolution",
+                    "expected_path": str(target_path),
+                }
+            )
+
+    if unresolved_models:
+        return _json_error_payload(
+            stage="model_resolution",
+            message="Failed to resolve required models from app-defined artifacts before startup",
+            details={
+                "unresolved_models": unresolved_models,
+                "configured_artifact_count": len(artifact_specs),
+            },
+        )
+
+    for spec in custom_node_specs:
+        repo_name = spec.target_path.strip() or _repo_dir_name(spec.source_url)
+        node_dir = Path("/opt/comfy/custom_nodes") / repo_name
+        if not node_dir.exists():
+            return _json_error_payload(
+                stage="artifact_verification",
+                message="Custom node artifact missing on disk before startup",
+                details={"source_url": spec.source_url, "expected_path": str(node_dir)},
+            )
+    if installed_count > 0:
+        print(f"[bootstrap] prestart installed models count={installed_count}", file=sys.stderr)
+    return None
+
+
+def _run_artifact_failure_endpoint(
+    listen_host: str,
+    listen_port: int,
+    api_key: str,
+    error_payload: dict,
+) -> int:
+    class ArtifactFailureHandler(BaseHTTPRequestHandler):
+        def _json_response(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:
+            return self.headers.get("x-api-key", "") == api_key
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/healthz":
+                self._json_response(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {
+                        "ok": False,
+                        "status": "artifact_resolver_failed",
+                    },
+                )
+                return
+
+            if self.path == "/artifact-resolver/error":
+                if not self._authorized():
+                    self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                self._json_response(HTTPStatus.SERVICE_UNAVAILABLE, error_payload)
+                return
+
+            self._json_response(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/run":
+                if not self._authorized():
+                    self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                self._json_response(HTTPStatus.SERVICE_UNAVAILABLE, error_payload)
+                return
+            self._json_response(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    server = ThreadingHTTPServer((listen_host, listen_port), ArtifactFailureHandler)
+    print(
+        f"[bootstrap] artifact resolver failed; serving error endpoint on http://{listen_host}:{listen_port}",
+        file=sys.stderr,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server.server_close()
+    return 0
 
 
 def _move_dir_contents(source_dir: Path, target_dir: Path) -> None:
@@ -934,6 +1418,7 @@ def run_bootstrap(
 
     contract = parse_workflow_contract(contract_path)
     workflow_payload = json.loads(workflow_path.read_text(encoding="utf-8"))
+    preflight_payload = build_preflight_payload(workflow_payload, contract)
 
     cache_models_root = Path(
         os.getenv("COMFY_ENDPOINTS_CACHE_MODEL_ROOT", str(cache_root / "models")).strip()
@@ -952,6 +1437,18 @@ def run_bootstrap(
         min_file_size_mb=min_file_size_mb,
     )
     manager.reconcile()
+
+    resolver_error = _prestart_resolve_artifacts_or_error(
+        preflight_payload=preflight_payload,
+        cache_models_root=cache_models_root,
+    )
+    if resolver_error:
+        return _run_artifact_failure_endpoint(
+            listen_host="0.0.0.0",
+            listen_port=gateway_port,
+            api_key=api_key,
+            error_payload=resolver_error,
+        )
 
     comfy_command = os.getenv(
         "COMFY_START_COMMAND",
@@ -987,107 +1484,31 @@ def run_bootstrap(
     try:
         comfy_url = "http://127.0.0.1:8188"
         wait_for_comfy_ready(comfy_url)
-        _log_manager_endpoint_probes(comfy_url)
-        preflight_payload = build_preflight_payload(workflow_payload, contract)
         comfy_client = ComfyClient(comfy_url)
-        max_preflight_attempts = int(os.getenv("COMFY_ENDPOINTS_PREFLIGHT_MAX_ATTEMPTS", "8"))
-        object_info_payload: dict | None = None
-        for attempt in range(1, max_preflight_attempts + 1):
-            try:
-                preflight_prompt_id = comfy_client.queue_prompt(preflight_payload)
-                print(
-                    f"[bootstrap] comfy preflight queue passed prompt_id={preflight_prompt_id}",
-                    file=sys.stderr,
-                )
-                break
-            except ComfyClientError as exc:
-                missing_nodes = _missing_nodes_from_preflight_error(exc)
-                if not missing_nodes:
-                    if object_info_payload is None:
-                        try:
-                            object_info_payload = comfy_client.get_object_info()
-                        except ComfyClientError:
-                            object_info_payload = {}
-                    missing_nodes = _missing_nodes_from_object_info(
-                        prompt_payload=preflight_payload,
-                        object_info_payload=object_info_payload,
-                    )
-
-                if missing_nodes:
-                    print(
-                        "[bootstrap] detected missing nodes: "
-                        + ", ".join(item.class_type for item in missing_nodes),
-                        file=sys.stderr,
-                    )
-                    if attempt == max_preflight_attempts:
-                        raise
-                    installed_nodes = _install_missing_custom_nodes(
-                        comfy_client=comfy_client,
-                        requirements=missing_nodes,
-                    )
-                    if installed_nodes <= 0:
-                        raise
-                    if comfy_process.poll() is None:
-                        comfy_process.terminate()
-                        try:
-                            comfy_process.wait(timeout=30)
-                        except subprocess.TimeoutExpired:
-                            comfy_process.kill()
-                    comfy_process = start_comfy_process()
-                    wait_for_comfy_ready(comfy_url)
-                    _log_manager_endpoint_probes(comfy_url)
-                    comfy_client = ComfyClient(comfy_url)
-                    object_info_payload = None
-                    print(
-                        f"[bootstrap] preflight retry attempt={attempt + 1} after installing "
-                        f"{installed_nodes} custom node(s)",
-                        file=sys.stderr,
-                    )
-                    time.sleep(2)
-                    continue
-
-                missing_models = _missing_models_from_preflight_error(exc)
-                if not missing_models:
-                    if object_info_payload is None:
-                        try:
-                            object_info_payload = comfy_client.get_object_info()
-                        except ComfyClientError:
-                            object_info_payload = {}
-                    missing_models = _missing_models_from_object_info(
-                        prompt_payload=preflight_payload,
-                        object_info_payload=object_info_payload,
-                    )
-
-                known_requirements = _known_model_requirements_from_prompt(preflight_payload)
-                if known_requirements:
-                    dedup: dict[tuple[str | None, str, str], MissingModelRequirement] = {
-                        (item.class_type, item.input_name, item.filename): item for item in missing_models
+        try:
+            preflight_prompt_id = comfy_client.queue_prompt(preflight_payload)
+            print(
+                f"[bootstrap] comfy preflight queue passed prompt_id={preflight_prompt_id}",
+                file=sys.stderr,
+            )
+        except ComfyClientError as exc:
+            details: dict[str, object] = {}
+            missing_nodes = _missing_nodes_from_preflight_error(exc)
+            if missing_nodes:
+                details["missing_nodes"] = [item.class_type for item in missing_nodes]
+            missing_models = _missing_models_from_preflight_error(exc)
+            if missing_models:
+                details["missing_models"] = [
+                    {
+                        "class_type": item.class_type,
+                        "input_name": item.input_name,
+                        "filename": item.filename,
                     }
-                    for item in known_requirements:
-                        dedup.setdefault((item.class_type, item.input_name, item.filename), item)
-                    missing_models = list(dedup.values())
-                if missing_models:
-                    print(
-                        "[bootstrap] detected missing models: "
-                        + ", ".join(f"{item.input_name}={item.filename}" for item in missing_models),
-                        file=sys.stderr,
-                    )
-                if not missing_models or attempt == max_preflight_attempts:
-                    raise
-
-                installed = _install_missing_models(
-                    comfy_client=comfy_client,
-                    requirements=missing_models,
-                    cache_models_root=cache_models_root,
-                )
-                if installed <= 0:
-                    raise
-
-                print(
-                    f"[bootstrap] preflight retry attempt={attempt + 1} after installing {installed} model(s)",
-                    file=sys.stderr,
-                )
-                time.sleep(2)
+                    for item in missing_models
+                ]
+            raise RuntimeError(
+                f"Comfy preflight queue failed after prestart artifact resolution: {exc}; details={details}"
+            ) from exc
     except ComfyClientError as exc:
         if comfy_process.poll() is None:
             comfy_process.terminate()

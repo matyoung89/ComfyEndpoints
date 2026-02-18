@@ -50,5 +50,34 @@
         "ref": "main"
       }
     ]
-  }
+  },
+  "artifacts": [
+    {
+      "kind": "custom_node",
+      "source_url": "https://github.com/kijai/ComfyUI-WanVideoWrapper",
+      "ref": "main",
+      "match": "ComfyUI-WanVideoWrapper",
+      "target_subdir": "custom_nodes",
+      "target_path": "ComfyUI-WanVideoWrapper",
+      "provides": [
+        "WanVideoVAELoader",
+        "WanVideoModelLoader",
+        "WanVideoAnimateEmbeds",
+        "WanVideoSampler",
+        "WanVideoDecode"
+      ]
+    },
+    {
+      "match": "wanvideo/Wan2_1_VAE_bf16.safetensors",
+      "source_url": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1_VAE_bf16.safetensors",
+      "target_subdir": "vae",
+      "target_path": "wanvideo/Wan2_1_VAE_bf16.safetensors"
+    },
+    {
+      "match": "WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+      "source_url": "https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan22Animate/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+      "target_subdir": "diffusion_models",
+      "target_path": "WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors"
+    }
+  ]
 }

@@ -15,7 +15,9 @@ from comfy_endpoints.deploy.bootstrap import (
     _find_repo_urls_for_package_ids,
     _find_repo_urls_for_node_class,
     _install_missing_custom_nodes,
+    _install_missing_custom_nodes_from_catalog,
     _install_missing_models,
+    _install_missing_models_from_entries,
     _iter_model_entries,
     _missing_nodes_from_object_info,
     _missing_nodes_from_preflight_error,
@@ -24,6 +26,10 @@ from comfy_endpoints.deploy.bootstrap import (
     _missing_models_from_object_info,
     _missing_models_from_preflight_error,
     _probe_manager_endpoint_status,
+    _prestart_resolve_artifacts_or_error,
+    _required_nodes_from_prompt,
+    _resolve_missing_custom_nodes_from_catalog,
+    _resolve_missing_models_from_entries,
 )
 from comfy_endpoints.gateway.comfy_client import ComfyClientError
 
@@ -379,6 +385,23 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         parsed = _missing_nodes_from_object_info(prompt_payload, object_info_payload)
         self.assertEqual(parsed, [MissingNodeRequirement(class_type="Wan22Animate")])
 
+    def test_required_nodes_from_prompt_deduplicates_class_types(self) -> None:
+        prompt_payload = {
+            "prompt": {
+                "1": {"class_type": "WanVideoVAELoader", "inputs": {}},
+                "2": {"class_type": "WanVideoVAELoader", "inputs": {}},
+                "3": {"class_type": "WanVideoModelLoader", "inputs": {}},
+            }
+        }
+        parsed = _required_nodes_from_prompt(prompt_payload)
+        self.assertEqual(
+            parsed,
+            [
+                MissingNodeRequirement(class_type="WanVideoVAELoader"),
+                MissingNodeRequirement(class_type="WanVideoModelLoader"),
+            ],
+        )
+
     def test_find_repo_urls_for_node_class_from_mapping(self) -> None:
         payload = {
             "https://github.com/example/custom-wan-node": [["Wan22Animate"]],
@@ -508,6 +531,105 @@ class BootstrapDependencyResolutionTest(unittest.TestCase):
         urls = _find_repo_urls_for_package_ids(package_ids, node_list_payload)
         self.assertEqual(package_ids, {"example-wan-pack"})
         self.assertEqual(urls, {"https://github.com/example/custom-wan-node"})
+
+    def test_install_missing_custom_nodes_from_catalog_uses_override(self) -> None:
+        with mock.patch(
+            "comfy_endpoints.deploy.bootstrap._install_custom_node_by_git_clone",
+            return_value=True,
+        ) as mocked_clone:
+            with mock.patch(
+                "comfy_endpoints.deploy.bootstrap._install_custom_node_python_dependencies",
+            ) as mocked_deps:
+                with mock.patch(
+                    "comfy_endpoints.deploy.bootstrap._install_custom_node_override_packages",
+                ) as mocked_override_pkgs:
+                    count = _install_missing_custom_nodes_from_catalog(
+                        requirements=[MissingNodeRequirement(class_type="WanVideoVAELoader")],
+                        mapping_payload={
+                            "https://github.com/LeonQ8/ComfyUI-Dynamic-Lora-Scheduler": [["WanVideoVAELoader"]]
+                        },
+                        list_payload={},
+                    )
+        self.assertEqual(count, 1)
+        mocked_clone.assert_called_once_with("https://github.com/kijai/ComfyUI-WanVideoWrapper")
+        mocked_deps.assert_called_once_with("https://github.com/kijai/ComfyUI-WanVideoWrapper")
+        mocked_override_pkgs.assert_called_once_with("WanVideoVAELoader")
+
+    def test_install_missing_models_from_entries(self) -> None:
+        requirements = [
+            MissingModelRequirement(
+                input_name="model_name",
+                filename="wanvideo/Wan2_1_VAE_bf16.safetensors",
+                class_type="WanVideoVAELoader",
+            )
+        ]
+        entries = [
+            {
+                "filename": "Wan2_1_VAE_bf16.safetensors",
+                "url": "https://example.com/Wan2_1_VAE_bf16.safetensors",
+                "type": "vae",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with mock.patch("comfy_endpoints.deploy.bootstrap._download_file") as mocked_download:
+                count = _install_missing_models_from_entries(
+                    requirements=requirements,
+                    entries=entries,
+                    cache_models_root=root / "cache_models",
+                )
+
+            self.assertEqual(count, 1)
+            mocked_download.assert_called_once()
+            target_path = mocked_download.call_args.args[1]
+            self.assertEqual(
+                str(target_path),
+                str(root / "cache_models" / "vae" / "wanvideo" / "Wan2_1_VAE_bf16.safetensors"),
+            )
+
+    def test_resolve_missing_custom_nodes_from_catalog_reports_unresolved(self) -> None:
+        with mock.patch(
+            "comfy_endpoints.deploy.bootstrap._install_custom_node_by_git_clone",
+            return_value=False,
+        ):
+            _, unresolved = _resolve_missing_custom_nodes_from_catalog(
+                requirements=[MissingNodeRequirement(class_type="UnknownNodeClass")],
+                mapping_payload={},
+                list_payload={},
+            )
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]["reason"], "no_catalog_match")
+
+    def test_resolve_missing_models_from_entries_reports_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _, unresolved = _resolve_missing_models_from_entries(
+                requirements=[
+                    MissingModelRequirement(
+                        input_name="model",
+                        filename="WanVideo/2_2/missing.safetensors",
+                        class_type="WanVideoModelLoader",
+                    )
+                ],
+                entries=[],
+                cache_models_root=Path(tmp_dir) / "cache_models",
+            )
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]["reason"], "no_model_catalog_entries")
+
+    def test_prestart_resolver_returns_error_payload_on_config_parse_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch(
+                "comfy_endpoints.deploy.bootstrap._load_app_artifact_specs_from_env",
+                side_effect=RuntimeError("bad config"),
+            ):
+                error_payload = _prestart_resolve_artifacts_or_error(
+                    preflight_payload={"prompt": {}},
+                    cache_models_root=Path(tmp_dir) / "cache_models",
+                )
+        self.assertIsNotNone(error_payload)
+        assert error_payload is not None
+        self.assertEqual(error_payload["status"], "artifact_resolver_failed")
+        self.assertEqual(error_payload["stage"], "artifact_config")
 
 
 if __name__ == "__main__":

@@ -71,6 +71,17 @@ class BuildSpec:
 
 
 @dataclass(slots=True)
+class ArtifactSourceSpec:
+    match: str
+    source_url: str
+    target_subdir: str
+    target_path: str
+    kind: str = "model"
+    ref: str | None = None
+    provides: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class AppSpecV1:
     app_id: str
     version: str
@@ -82,6 +93,7 @@ class AppSpecV1:
     endpoint: EndpointSpec
     cache_policy: CachePolicy
     build: BuildSpec
+    artifacts: list[ArtifactSourceSpec] = field(default_factory=list)
     compute_policy: ComputePolicy | None = None
 
 

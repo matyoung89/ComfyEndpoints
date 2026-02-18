@@ -1,5 +1,6 @@
 from comfy_endpoints.models.types import (
     AppSpecV1,
+    ArtifactSourceSpec,
     AuthMode,
     BuildPluginSpec,
     BuildSpec,
@@ -16,6 +17,7 @@ from comfy_endpoints.models.types import (
 
 __all__ = [
     "AppSpecV1",
+    "ArtifactSourceSpec",
     "AuthMode",
     "BuildPluginSpec",
     "BuildSpec",

@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from comfy_endpoints.deploy.predeploy_validator import validate_artifacts_for_app_spec
 from comfy_endpoints.runtime import DeploymentService
 from comfy_endpoints.runtime.state_store import DeploymentStore
 from comfy_endpoints.utils.env_loader import load_local_env
@@ -19,6 +20,7 @@ from comfy_endpoints.utils.env_loader import load_local_env
 STATIC_ROOT_COMMANDS = {
     "init",
     "validate",
+    "validate-artifacts",
     "deploy",
     "status",
     "logs",
@@ -142,6 +144,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
                             }
                         ],
                     },
+                    "artifacts": [],
                 },
                 indent=2,
             ),
@@ -525,6 +528,12 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     app_id, contract_id = svc.validate(Path(args.app_spec).resolve())
     print(json.dumps({"app_id": app_id, "contract_id": contract_id, "result": "ok"}, indent=2))
     return 0
+
+
+def _cmd_validate_artifacts(args: argparse.Namespace) -> int:
+    result = validate_artifacts_for_app_spec(Path(args.app_spec).resolve())
+    print(result.to_json())
+    return 0 if result.ok else 2
 
 
 def _cmd_deploy(args: argparse.Namespace) -> int:
@@ -920,6 +929,13 @@ def build_parser() -> argparse.ArgumentParser:
     validate_cmd = subparsers.add_parser("validate", help="Validate app spec and workflow contract")
     validate_cmd.add_argument("app_spec")
     validate_cmd.set_defaults(func=_cmd_validate)
+
+    validate_artifacts_cmd = subparsers.add_parser(
+        "validate-artifacts",
+        help="Validate required workflow artifacts against app-defined artifact sources before deploy",
+    )
+    validate_artifacts_cmd.add_argument("app_spec")
+    validate_artifacts_cmd.set_defaults(func=_cmd_validate_artifacts)
 
     deploy_cmd = subparsers.add_parser("deploy", help="Deploy the app to configured provider")
     deploy_cmd.add_argument("app_spec")

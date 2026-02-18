@@ -7,6 +7,7 @@ from pathlib import Path
 from comfy_endpoints.contracts.parser import ContractError, load_structured_file
 from comfy_endpoints.models import (
     AppSpecV1,
+    ArtifactSourceSpec,
     AuthMode,
     BuildPluginSpec,
     BuildSpec,
@@ -97,6 +98,34 @@ def parse_app_spec(path: Path) -> AppSpecV1:
         if compute_policy.gpu_count <= 0:
             raise ValidationError("compute_policy.gpu_count must be > 0")
 
+    artifact_specs: list[ArtifactSourceSpec] = []
+    for index, item in enumerate(raw.get("artifacts", [])):
+        if not isinstance(item, dict):
+            raise ValidationError(f"artifacts[{index}] must be an object")
+        kind = str(item.get("kind", "model")).strip() or "model"
+        if kind not in {"model", "custom_node"}:
+            raise ValidationError(f"artifacts[{index}].kind must be 'model' or 'custom_node'")
+        required_fields = {"source_url"}
+        if kind == "model":
+            required_fields.update({"match", "target_subdir", "target_path"})
+        _expect_fields(item, required_fields, f"artifacts[{index}]")
+        provides_raw = item.get("provides", [])
+        if provides_raw is None:
+            provides_raw = []
+        if not isinstance(provides_raw, list):
+            raise ValidationError(f"artifacts[{index}].provides must be an array")
+        artifact_specs.append(
+            ArtifactSourceSpec(
+                match=str(item.get("match", "")).strip(),
+                source_url=str(item["source_url"]).strip(),
+                target_subdir=str(item.get("target_subdir", "")).strip(),
+                target_path=str(item.get("target_path", "")).strip(),
+                kind=kind,
+                ref=str(item.get("ref", "")).strip() or None,
+                provides=[str(value).strip() for value in provides_raw if str(value).strip()],
+            )
+        )
+
     return AppSpecV1(
         app_id=str(raw["app_id"]),
         version=str(raw["version"]),
@@ -150,6 +179,7 @@ def parse_app_spec(path: Path) -> AppSpecV1:
                 else None
             ),
         ),
+        artifacts=artifact_specs,
     )
 
 
