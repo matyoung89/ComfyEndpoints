@@ -908,6 +908,115 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _example_file_extension(media_type: str) -> str:
+    normalized = media_type.strip().lower()
+    if normalized.startswith("image/"):
+        return "png"
+    if normalized.startswith("video/"):
+        return "mp4"
+    if normalized.startswith("audio/"):
+        return "wav"
+    return "bin"
+
+
+def _example_scalar_value(field_type: str, field_name: str) -> str:
+    normalized = field_type.strip().lower()
+    if normalized == "string":
+        return f"\"example {field_name}\""
+    if normalized == "integer":
+        return "1"
+    if normalized == "number":
+        return "0.5"
+    if normalized == "boolean":
+        return "true"
+    if normalized == "array":
+        return "\"[]\""
+    if normalized == "object":
+        return "\"{}\""
+    return f"\"{field_name}\""
+
+
+def _print_dynamic_invoke_help(state_dir: str | None, app_id: str) -> int:
+    resolved_app_id, endpoint_url = _resolve_one_target(state_dir, app_id)
+    contract = _discover_contract(resolved_app_id, endpoint_url)
+    inputs = contract.get("inputs", [])
+
+    print(f"usage: comfy-endpoints invoke {resolved_app_id} [options] [dynamic input flags]")
+    print()
+    print("core options:")
+    print("  --input-json JSON        Provide full input payload as JSON object")
+    print("  --wait                   Wait for job completion")
+    print("  --timeout-seconds N      Optional client-side timeout while waiting (default: infinite)")
+    print("  --poll-seconds N         Poll interval while waiting (default: 2.0)")
+    print()
+    print("dynamic input flags for this app:")
+
+    required_segments: list[str] = []
+    for item in inputs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        field_type = str(item.get("type", "string")).strip()
+        required = bool(item.get("required", False))
+        required_label = "required" if required else "optional"
+
+        if _is_media_contract_type(field_type):
+            ext = _example_file_extension(field_type)
+            print(f"  --input-{name}-file PATH    ({field_type}, {required_label})")
+            print(f"  --input-{name}-id FILE_ID   ({field_type}, {required_label})")
+            if required:
+                required_segments.append(f"--input-{name}-file ./{name}.{ext}")
+        else:
+            print(f"  --input-{name} VALUE        ({field_type}, {required_label})")
+            if required:
+                required_segments.append(f"--input-{name} {_example_scalar_value(field_type, name)}")
+
+    print()
+    print("examples:")
+    required_example = " ".join(required_segments).strip()
+    if required_example:
+        print(f"  comfy-endpoints invoke {resolved_app_id} {required_example} --wait")
+        print(f"  comfy-endpoints {resolved_app_id} {required_example} --wait")
+    print(f"  comfy-endpoints invoke {resolved_app_id} --input-json '{{\"...\": \"...\"}}' --wait")
+    print(f"  comfy-endpoints jobs cancel {resolved_app_id} <job_id>")
+    return 0
+
+
+def _detect_invoke_help_request(effective_argv: list[str]) -> tuple[str | None, str] | None:
+    if not effective_argv:
+        return None
+
+    state_dir: str | None = None
+    index = 0
+    while index < len(effective_argv):
+        token = effective_argv[index]
+        if token == "--state-dir":
+            if index + 1 >= len(effective_argv):
+                return None
+            state_dir = effective_argv[index + 1]
+            index += 2
+            continue
+        break
+
+    if index >= len(effective_argv):
+        return None
+    if effective_argv[index] != "invoke":
+        return None
+    if index + 1 >= len(effective_argv):
+        return None
+
+    app_id = effective_argv[index + 1]
+    if not app_id or app_id.startswith("-"):
+        return None
+
+    remainder = effective_argv[index + 2 :]
+    if "--help" in remainder or "-h" in remainder:
+        return (state_dir, app_id)
+    return None
+
+
 def _cmd_completion(args: argparse.Namespace) -> int:
     if args.shell == "bash":
         print(
@@ -1094,6 +1203,11 @@ def main(argv: list[str] | None = None) -> int:
     load_local_env()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     effective_argv = _expand_dynamic_shorthand(raw_argv)
+
+    invoke_help_request = _detect_invoke_help_request(effective_argv)
+    if invoke_help_request is not None:
+        state_dir, app_id = invoke_help_request
+        return _print_dynamic_invoke_help(state_dir, app_id)
 
     parser = build_parser()
     args, unknown = parser.parse_known_args(effective_argv)

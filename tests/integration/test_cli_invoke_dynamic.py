@@ -237,6 +237,68 @@ class CliInvokeDynamicIntegrationTest(unittest.TestCase):
                         self.assertIn("Cancellation requested for job_id=job-timeout", str(ctx.exception))
                     self.assertEqual(mocked_post.call_count, 2)
 
+    def test_invoke_help_shows_dynamic_flags_and_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            state_dir = self._state_dir_with_demo(root)
+            contract = {
+                "inputs": [
+                    {"name": "reference_image", "type": "image/png", "required": True, "node_id": "1"},
+                    {"name": "driving_video", "type": "video/mp4", "required": True, "node_id": "2"},
+                    {"name": "seed", "type": "integer", "required": False, "node_id": "3"},
+                ],
+                "outputs": [],
+            }
+            with mock.patch("comfy_endpoints.cli.main._discover_contract", return_value=contract):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "--state-dir",
+                                str(state_dir),
+                                "invoke",
+                                "demo",
+                                "--help",
+                            ]
+                        ),
+                        0,
+                    )
+                output = stdout.getvalue()
+                self.assertIn("--input-reference_image-file", output)
+                self.assertIn("--input-driving_video-file", output)
+                self.assertIn("--input-seed", output)
+                self.assertIn("comfy-endpoints invoke demo", output)
+                self.assertIn("comfy-endpoints jobs cancel demo <job_id>", output)
+
+    def test_shorthand_help_shows_dynamic_invoke_help(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            state_dir = self._state_dir_with_demo(root)
+            contract = {
+                "inputs": [
+                    {"name": "prompt", "type": "string", "required": True, "node_id": "1"},
+                ],
+                "outputs": [],
+            }
+            with mock.patch("comfy_endpoints.cli.main._discover_contract", return_value=contract):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "--state-dir",
+                                str(state_dir),
+                                "demo",
+                                "--help",
+                            ]
+                        ),
+                        0,
+                    )
+                output = stdout.getvalue()
+                self.assertIn("usage: comfy-endpoints invoke demo", output)
+                self.assertIn("--input-prompt", output)
+
 
 if __name__ == "__main__":
     unittest.main()
