@@ -80,6 +80,10 @@ class OutputResolutionError(ValueError):
     pass
 
 
+class JobCanceledError(RuntimeError):
+    pass
+
+
 def _is_media_contract_type(type_name: str) -> bool:
     normalized = type_name.strip().lower()
     return any(normalized.startswith(prefix) for prefix in MEDIA_PREFIXES)
@@ -152,6 +156,19 @@ def _first_list_item(value: object) -> object | None:
     if isinstance(value, list) and value:
         return value[0]
     return None
+
+
+def _optional_timeout_seconds(env_var_name: str) -> float | None:
+    raw = os.getenv(env_var_name, "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in {"0", "none", "infinite", "inf"}:
+        return None
+    parsed = float(raw)
+    if parsed <= 0:
+        return None
+    return parsed
 
 
 def _node_scalar_value(node_output: dict) -> object:
@@ -400,6 +417,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "state": record.state,
                     "output": output_payload,
                     "error": record.error,
+                    "prompt_id": record.prompt_id,
+                    "cancel_requested": record.cancel_requested,
                 },
             )
             return
@@ -435,6 +454,47 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._json_response(HTTPStatus.CREATED, self._file_payload(record))
+            return
+
+        if path.startswith("/jobs/") and path.endswith("/cancel"):
+            if not self._authorized():
+                self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+
+            job_id = path.split("/jobs/", 1)[1][: -len("/cancel")]
+            if not job_id:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "invalid_job_id"})
+                return
+
+            record = self.app.job_store.get(job_id)
+            if not record:
+                self._json_response(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
+                return
+
+            terminal_states = {"completed", "failed", "error", "canceled", "cancelled"}
+            if str(record.state).strip().lower() in terminal_states:
+                self._json_response(
+                    HTTPStatus.OK,
+                    {"job_id": record.job_id, "state": record.state, "already_terminal": True},
+                )
+                return
+
+            self.app.job_store.request_cancel(job_id)
+            refreshed = self.app.job_store.get(job_id)
+            if refreshed and refreshed.prompt_id:
+                try:
+                    self.app.comfy_client.delete_prompt_from_queue(refreshed.prompt_id)
+                except ComfyClientError:
+                    pass
+                try:
+                    self.app.comfy_client.interrupt()
+                except ComfyClientError:
+                    pass
+
+            self._json_response(
+                HTTPStatus.ACCEPTED,
+                {"job_id": job_id, "state": "canceling", "cancel_requested": True},
+            )
             return
 
         if path != "/run":
@@ -473,6 +533,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _execute_job(self, job_id: str, payload: dict) -> None:
         try:
             self.app.job_store.mark_running(job_id)
+            if self.app.job_store.is_cancel_requested(job_id):
+                raise JobCanceledError("CANCELED_BY_REQUEST")
             mapped_prompt = map_contract_payload_to_prompt(
                 workflow_payload=self.app.workflow,
                 contract=self.app.contract,
@@ -480,9 +542,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 job_id=job_id,
             )
             prompt_id = self.app.comfy_client.queue_prompt(mapped_prompt)
-            self._wait_for_prompt_terminal(prompt_id)
+            self.app.job_store.set_prompt_id(job_id, prompt_id)
+            self._wait_for_prompt_terminal(job_id=job_id, prompt_id=prompt_id)
             artifact_grace_seconds = float(os.getenv("COMFY_ENDPOINTS_ARTIFACT_GRACE_SECONDS", "20"))
-            result = self._resolve_contract_outputs(job_id, timeout_seconds=artifact_grace_seconds)
+            result = self._resolve_contract_outputs(job_id=job_id, timeout_seconds=artifact_grace_seconds)
             self.app.job_store.mark_completed(
                 job_id,
                 {
@@ -495,17 +558,35 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.app.job_store.mark_failed(job_id, f"VALIDATION_ERROR:{exc}")
         except OutputResolutionError as exc:
             self.app.job_store.mark_failed(job_id, str(exc))
+        except JobCanceledError as exc:
+            self.app.job_store.mark_canceled(job_id, str(exc))
         except ComfyClientError as exc:
             self.app.job_store.mark_failed(job_id, f"QUEUE_ERROR:{exc}")
         except Exception as exc:  # noqa: BLE001
             self.app.job_store.mark_failed(job_id, f"SYSTEM_ERROR:{exc}")
 
-    def _wait_for_prompt_terminal(self, prompt_id: str) -> None:
-        timeout_seconds = float(os.getenv("COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS", "900"))
+    def _wait_for_prompt_terminal(self, job_id: str, prompt_id: str) -> None:
+        timeout_seconds = _optional_timeout_seconds("COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS")
         poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
-        deadline = time.time() + timeout_seconds
+        deadline = (time.time() + timeout_seconds) if timeout_seconds is not None else None
 
-        while time.time() < deadline:
+        while True:
+            if self.app.job_store.is_cancel_requested(job_id):
+                try:
+                    self.app.comfy_client.delete_prompt_from_queue(prompt_id)
+                except ComfyClientError:
+                    pass
+                try:
+                    self.app.comfy_client.interrupt()
+                except ComfyClientError:
+                    pass
+                raise JobCanceledError("CANCELED_BY_REQUEST")
+
+            if deadline is not None and time.time() >= deadline:
+                raise OutputResolutionError(
+                    f"PROMPT_TIMEOUT:history_not_terminal:{prompt_id}"
+                )
+
             history_payload = self.app.comfy_client.get_history(prompt_id)
             prompt_history = _extract_prompt_history(history_payload, prompt_id)
             if not prompt_history:
@@ -526,16 +607,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
             time.sleep(max(0.2, poll_seconds))
 
-        raise OutputResolutionError(
-            f"PROMPT_TIMEOUT:history_not_terminal:{prompt_id}"
-        )
-
     def _resolve_contract_outputs(self, job_id: str, timeout_seconds: float) -> dict[str, object]:
         poll_seconds = float(os.getenv("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", "1.5"))
         deadline = time.time() + timeout_seconds
         expected_output_names = [field.name for field in self.app.contract.outputs]
 
         while time.time() < deadline:
+            if self.app.job_store.is_cancel_requested(job_id):
+                raise JobCanceledError("CANCELED_BY_REQUEST")
             artifacts = self.app.job_store.read_output_artifacts(job_id)
             missing = [name for name in expected_output_names if name not in artifacts]
             if missing:

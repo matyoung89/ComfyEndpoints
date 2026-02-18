@@ -4,6 +4,9 @@
   "workflow_path": "./workflow.json",
   "provider": "runpod",
   "gpu_profile": "A10G",
+  "preferred_gpu_types": [
+    "NVIDIA RTX PRO 6000"
+  ],
   "regions": [
     "US"
   ],

@@ -253,6 +253,72 @@ class RunpodProvider(CloudProviderAdapter):
             candidate_ids = filtered
         return candidate_ids
 
+    def _gpu_type_ids_for_preferred(self, preferred_gpu_types: list[str]) -> list[str]:
+        data = self._graphql_request(
+            """
+            query GetGpuTypes {
+              gpuTypes {
+                id
+                displayName
+                memoryInGb
+              }
+            }
+            """
+        )
+        gpu_types: list[dict[str, Any]] = []
+        if isinstance(data, dict):
+            raw_gpu_types = data.get("gpuTypes")
+            if isinstance(raw_gpu_types, list):
+                gpu_types = [item for item in raw_gpu_types if isinstance(item, dict)]
+        if not gpu_types:
+            raise RunpodError("Unable to resolve RunPod GPU catalog for preferred_gpu_types")
+
+        preferred_normalized = [item.strip().lower() for item in preferred_gpu_types if item.strip()]
+        if not preferred_normalized:
+            raise RunpodError("preferred_gpu_types is empty after normalization")
+
+        allowed_gpu_type_ids = self._rest_gpu_type_enum()
+        chosen_ids: list[str] = []
+        missing: list[str] = []
+        discovered: list[str] = []
+
+        for preferred in preferred_normalized:
+            found_id: str | None = None
+            for gpu in gpu_types:
+                gpu_id = str(gpu.get("id") or "").strip()
+                if not gpu_id:
+                    continue
+                display_name = str(gpu.get("displayName") or gpu_id).strip()
+                discovered.append(display_name)
+                id_normalized = gpu_id.lower()
+                display_normalized = display_name.lower()
+                if preferred == id_normalized or preferred == display_normalized:
+                    if allowed_gpu_type_ids and gpu_id not in allowed_gpu_type_ids:
+                        continue
+                    found_id = gpu_id
+                    break
+            if found_id is None:
+                missing.append(preferred)
+            else:
+                chosen_ids.append(found_id)
+
+        if missing:
+            sample = ", ".join(sorted(set(discovered))[:30]) if discovered else "none"
+            raise RunpodError(
+                "preferred_gpu_types not available in RunPod catalog/openapi enum. "
+                f"Missing: {', '.join(missing)}. Available sample: {sample}"
+            )
+
+        # Preserve priority order while deduplicating.
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for gpu_id in chosen_ids:
+            if gpu_id in seen:
+                continue
+            seen.add(gpu_id)
+            deduped.append(gpu_id)
+        return deduped
+
     def _rest_gpu_type_enum(self) -> set[str] | None:
         if self._rest_gpu_type_enum_cache is not None:
             return self._rest_gpu_type_enum_cache
@@ -366,7 +432,11 @@ class RunpodProvider(CloudProviderAdapter):
         min_ram_per_gpu_gb = compute_policy.min_ram_per_gpu_gb if compute_policy else None
         min_vram_gb = compute_policy.min_vram_gb if compute_policy else None
         gpu_type_ids: list[str] | None = None
-        if min_vram_gb is not None:
+        preferred_gpu_types = [item.strip() for item in app_spec.preferred_gpu_types if item.strip()]
+        if preferred_gpu_types:
+            # Strict mode: when preferred list is provided, only these GPU types are allowed.
+            gpu_type_ids = self._gpu_type_ids_for_preferred(preferred_gpu_types)
+        elif min_vram_gb is not None:
             gpu_type_ids = self._gpu_type_ids_with_min_vram(min_vram_gb)
         profiles = self._deployment_profiles()
         last_error: Exception | None = None

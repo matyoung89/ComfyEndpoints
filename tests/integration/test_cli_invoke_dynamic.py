@@ -198,6 +198,45 @@ class CliInvokeDynamicIntegrationTest(unittest.TestCase):
         self.assertIn("Timed out waiting for job_id=job-3", str(ctx.exception))
         self.assertIn("last_state=running", str(ctx.exception))
 
+    def test_invoke_wait_timeout_requests_remote_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            state_dir = self._state_dir_with_demo(root)
+            contract = {
+                "inputs": [
+                    {"name": "prompt", "type": "string", "required": True, "node_id": "1"},
+                ],
+                "outputs": [],
+            }
+            with mock.patch("comfy_endpoints.cli.main._discover_contract", return_value=contract):
+                with mock.patch(
+                    "comfy_endpoints.cli.main._request_json_post",
+                    side_effect=[
+                        {"job_id": "job-timeout", "state": "queued"},
+                        {"job_id": "job-timeout", "state": "canceling", "cancel_requested": True},
+                    ],
+                ) as mocked_post:
+                    with mock.patch(
+                        "comfy_endpoints.cli.main._poll_job_until_terminal",
+                        side_effect=RuntimeError("Timed out waiting for job_id=job-timeout, last_state=running"),
+                    ):
+                        with self.assertRaises(RuntimeError) as ctx:
+                            main(
+                                [
+                                    "--state-dir",
+                                    str(state_dir),
+                                    "invoke",
+                                    "demo",
+                                    "--input-prompt",
+                                    "hello",
+                                    "--wait",
+                                    "--timeout-seconds",
+                                    "1",
+                                ]
+                            )
+                        self.assertIn("Cancellation requested for job_id=job-timeout", str(ctx.exception))
+                    self.assertEqual(mocked_post.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,7 @@ class AppSpecV1:
     build: BuildSpec
     artifacts: list[ArtifactSourceSpec] = field(default_factory=list)
     compute_policy: ComputePolicy | None = None
+    preferred_gpu_types: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

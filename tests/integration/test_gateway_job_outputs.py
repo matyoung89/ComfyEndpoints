@@ -55,6 +55,12 @@ class _FakeComfyClient:
     def get_history(self, _prompt_id: str) -> dict:
         return {"prompt-1": {"outputs": self.outputs}}
 
+    def interrupt(self) -> None:
+        return None
+
+    def delete_prompt_from_queue(self, _prompt_id: str) -> None:
+        return None
+
     def get_view_media(self, filename: str, subfolder: str, media_type: str) -> bytes:
         _ = (filename, subfolder, media_type)
         return b"generated-image"
@@ -332,6 +338,78 @@ class GatewayJobOutputsIntegrationTest(unittest.TestCase):
             self.assertTrue(caption_artifact.exists())
             self.assertEqual(image_artifact.read_text(encoding="utf-8"), str(result["image"]))
             self.assertEqual(caption_artifact.read_text(encoding="utf-8"), "done")
+
+    def test_cancel_running_job_transitions_to_canceled(self) -> None:
+        class _SlowComfyClient(_FakeComfyClient):
+            def get_history(self, _prompt_id: str) -> dict:
+                return {}
+
+        previous_prompt_timeout = os.environ.get("COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS")
+        previous_poll = os.environ.get("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS")
+        os.environ["COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS"] = "none"
+        os.environ["COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS"] = "0.05"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                app = self._build_app(
+                    Path(tmp_dir),
+                    contract_outputs=[{"name": "image", "type": "image/png", "node_id": "9"}],
+                    comfy_outputs={"9": {"images": [{"filename": "x.png", "subfolder": "", "type": "output"}]}},
+                )
+                app.comfy_client = _SlowComfyClient(outputs={})
+
+                body = json.dumps({"prompt": "hello"}).encode("utf-8")
+                run_request = (
+                    b"POST /run HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"x-api-key: secret\r\n"
+                    b"content-type: application/json\r\n"
+                    b"connection: close\r\n"
+                    + f"content-length: {len(body)}\r\n\r\n".encode("ascii")
+                    + body
+                )
+                status, _headers, payload_body = self._round_trip(app, run_request)
+                self.assertEqual(status, 202)
+                job_id = json.loads(payload_body.decode("utf-8"))["job_id"]
+
+                cancel_request = (
+                    f"POST /jobs/{job_id}/cancel HTTP/1.1\r\n".encode("ascii")
+                    + b"Host: localhost\r\n"
+                    + b"x-api-key: secret\r\n"
+                    + b"content-type: application/json\r\n"
+                    + b"content-length: 2\r\n"
+                    + b"connection: close\r\n\r\n{}"
+                )
+                cancel_status, _cancel_headers, cancel_body = self._round_trip(app, cancel_request)
+                self.assertEqual(cancel_status, 202)
+                cancel_payload = json.loads(cancel_body.decode("utf-8"))
+                self.assertTrue(cancel_payload.get("cancel_requested"))
+
+                terminal_payload = None
+                for _ in range(120):
+                    job_request = (
+                        f"GET /jobs/{job_id} HTTP/1.1\r\n".encode("ascii")
+                        + b"Host: localhost\r\n"
+                        + b"x-api-key: secret\r\n"
+                        + b"connection: close\r\n\r\n"
+                    )
+                    _job_status, _job_headers, job_body = self._round_trip(app, job_request)
+                    candidate = json.loads(job_body.decode("utf-8"))
+                    if candidate.get("state") in {"canceled", "cancelled", "failed", "completed"}:
+                        terminal_payload = candidate
+                        break
+                    time.sleep(0.02)
+
+                assert terminal_payload is not None
+                self.assertEqual(terminal_payload["state"], "canceled")
+        finally:
+            if previous_prompt_timeout is None:
+                os.environ.pop("COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["COMFY_ENDPOINTS_PROMPT_TIMEOUT_SECONDS"] = previous_prompt_timeout
+            if previous_poll is None:
+                os.environ.pop("COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS", None)
+            else:
+                os.environ["COMFY_ENDPOINTS_OUTPUT_POLL_SECONDS"] = previous_poll
 
     def test_run_accepts_media_file_ids_for_two_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

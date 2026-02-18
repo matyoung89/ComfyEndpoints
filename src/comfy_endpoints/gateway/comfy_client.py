@@ -176,6 +176,13 @@ class ComfyClient:
         encoded_prompt_id = urllib.parse.quote(prompt_id, safe="")
         return self._request_json(f"/history/{encoded_prompt_id}", method="GET")
 
+    def interrupt(self) -> None:
+        self._request_json("/interrupt", method="POST", payload={})
+
+    def delete_prompt_from_queue(self, prompt_id: str) -> None:
+        # ComfyUI queue delete format accepts list of prompt ids.
+        self._request_json("/queue", method="POST", payload={"delete": [prompt_id]})
+
     def get_view_media(self, filename: str, subfolder: str, media_type: str) -> bytes:
         query = urllib.parse.urlencode(
             {

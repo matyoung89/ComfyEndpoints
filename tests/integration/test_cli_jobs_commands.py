@@ -85,7 +85,9 @@ class CliJobsCommandsIntegrationTest(unittest.TestCase):
                     ),
                     0,
                 )
-            self.assertIn("get", set(stdout.getvalue().splitlines()))
+            suggestions = set(stdout.getvalue().splitlines())
+            self.assertIn("get", suggestions)
+            self.assertIn("cancel", suggestions)
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
@@ -107,6 +109,38 @@ class CliJobsCommandsIntegrationTest(unittest.TestCase):
                     0,
                 )
             self.assertIn("demo", set(stdout.getvalue().splitlines()))
+
+    def test_jobs_cancel_posts_cancel_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            state_dir = self._state_dir_with_demo(root)
+            with mock.patch(
+                "comfy_endpoints.cli.main._request_json_post",
+                return_value={"job_id": "job-777", "state": "canceling", "cancel_requested": True},
+            ) as mocked_post:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "--state-dir",
+                                str(state_dir),
+                                "jobs",
+                                "cancel",
+                                "demo",
+                                "job-777",
+                            ]
+                        ),
+                        0,
+                    )
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["state"], "canceling")
+                mocked_post.assert_called_once_with(
+                    endpoint_url="https://demo.example.com",
+                    app_id="demo",
+                    path="/jobs/job-777/cancel",
+                    payload={},
+                )
 
 
 if __name__ == "__main__":

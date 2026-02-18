@@ -126,6 +126,18 @@ def parse_app_spec(path: Path) -> AppSpecV1:
             )
         )
 
+    preferred_gpu_types_raw = raw.get("preferred_gpu_types", [])
+    preferred_gpu_types: list[str] = []
+    if preferred_gpu_types_raw is None:
+        preferred_gpu_types_raw = []
+    if not isinstance(preferred_gpu_types_raw, list):
+        raise ValidationError("preferred_gpu_types must be an array of strings")
+    for index, item in enumerate(preferred_gpu_types_raw):
+        value = str(item).strip()
+        if not value:
+            raise ValidationError(f"preferred_gpu_types[{index}] must be non-empty")
+        preferred_gpu_types.append(value)
+
     return AppSpecV1(
         app_id=str(raw["app_id"]),
         version=str(raw["version"]),
@@ -180,6 +192,7 @@ def parse_app_spec(path: Path) -> AppSpecV1:
             ),
         ),
         artifacts=artifact_specs,
+        preferred_gpu_types=preferred_gpu_types,
     )
 
 

@@ -91,6 +91,32 @@ class RunpodProviderApiTest(unittest.TestCase):
         payload = mocked_rest.call_args.args[2]
         self.assertEqual(payload["gpuTypeIds"], ["gpu-1", "gpu-2"])
 
+    def test_create_deployment_uses_preferred_gpu_types_strictly(self) -> None:
+        provider = RunpodProvider()
+        app_spec = _app_spec()
+        app_spec.preferred_gpu_types = ["NVIDIA RTX PRO 6000"]
+        app_spec.compute_policy = ComputePolicy(min_vram_gb=24, gpu_count=1)
+        with mock.patch.object(provider, "_gpu_type_ids_for_preferred", return_value=["gpu-preferred-1"]) as mocked_pref:
+            with mock.patch.object(provider, "_gpu_type_ids_with_min_vram", return_value=["gpu-vram-1"]) as mocked_vram:
+                with mock.patch.object(provider, "_rest_request", return_value={"id": "pod-1"}) as mocked_rest:
+                    provider.create_deployment(app_spec)
+        payload = mocked_rest.call_args.args[2]
+        self.assertEqual(payload["gpuTypeIds"], ["gpu-preferred-1"])
+        mocked_pref.assert_called_once()
+        mocked_vram.assert_not_called()
+
+    def test_create_deployment_fails_when_preferred_gpu_not_available(self) -> None:
+        provider = RunpodProvider()
+        app_spec = _app_spec()
+        app_spec.preferred_gpu_types = ["NVIDIA RTX PRO 6000"]
+        with mock.patch.object(
+            provider,
+            "_gpu_type_ids_for_preferred",
+            side_effect=RuntimeError("preferred_gpu_types not available"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "preferred_gpu_types not available"):
+                provider.create_deployment(app_spec)
+
     def test_create_deployment_fails_when_no_gpu_type_meets_min_vram(self) -> None:
         provider = RunpodProvider()
         app_spec = _app_spec()
@@ -119,6 +145,26 @@ class RunpodProviderApiTest(unittest.TestCase):
                 gpu_type_ids = provider._gpu_type_ids_with_min_vram(64)
 
         self.assertEqual(gpu_type_ids, ["NVIDIA H100 PCIe"])
+
+    def test_gpu_type_ids_for_preferred_resolves_display_name_priority(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(
+            provider,
+            "_graphql_request",
+            return_value={
+                "gpuTypes": [
+                    {"id": "NVIDIA RTX PRO 6000", "displayName": "NVIDIA RTX PRO 6000", "memoryInGb": 96},
+                    {"id": "NVIDIA H100 PCIe", "displayName": "H100 PCIe", "memoryInGb": 80},
+                ]
+            },
+        ):
+            with mock.patch.object(
+                provider,
+                "_rest_gpu_type_enum",
+                return_value={"NVIDIA RTX PRO 6000", "NVIDIA H100 PCIe"},
+            ):
+                gpu_type_ids = provider._gpu_type_ids_for_preferred(["NVIDIA RTX PRO 6000", "NVIDIA H100 PCIe"])
+        self.assertEqual(gpu_type_ids, ["NVIDIA RTX PRO 6000", "NVIDIA H100 PCIe"])
 
     def test_gpu_type_ids_with_min_vram_fails_when_no_rest_enum_overlap(self) -> None:
         provider = RunpodProvider()

@@ -18,6 +18,8 @@ class JobRecord:
     input_payload: dict
     output_payload: dict | None
     error: str | None
+    prompt_id: str | None
+    cancel_requested: bool
 
 
 @dataclass(slots=True)
@@ -70,10 +72,14 @@ class JobStore:
                 state TEXT NOT NULL,
                 input_payload TEXT NOT NULL,
                 output_payload TEXT,
-                error TEXT
+                error TEXT,
+                prompt_id TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        self._ensure_jobs_column("prompt_id", "TEXT")
+        self._ensure_jobs_column("cancel_requested", "INTEGER NOT NULL DEFAULT 0")
         self._execute(
             """
             CREATE TABLE IF NOT EXISTS files (
@@ -92,11 +98,22 @@ class JobStore:
         )
         self._commit()
 
+    def _ensure_jobs_column(self, column_name: str, definition_sql: str) -> None:
+        rows = self._fetchall("PRAGMA table_info(jobs)")
+        existing = {str(row[1]) for row in rows if len(row) > 1}
+        if column_name in existing:
+            return
+        self._execute(f"ALTER TABLE jobs ADD COLUMN {column_name} {definition_sql}")
+
     def create(self, payload: dict) -> str:
         job_id = uuid.uuid4().hex
         self._execute(
-            "INSERT INTO jobs (job_id, state, input_payload, output_payload, error) VALUES (?, ?, ?, ?, ?)",
-            (job_id, "queued", json.dumps(payload), None, None),
+            """
+            INSERT INTO jobs (
+                job_id, state, input_payload, output_payload, error, prompt_id, cancel_requested
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, "queued", json.dumps(payload), None, None, None, 0),
         )
         self._commit()
         return job_id
@@ -118,6 +135,37 @@ class JobStore:
             ("failed", error, job_id),
         )
         self._commit()
+
+    def mark_canceled(self, job_id: str, error: str | None = None) -> None:
+        self._execute(
+            "UPDATE jobs SET state = ?, error = ? WHERE job_id = ?",
+            ("canceled", error, job_id),
+        )
+        self._commit()
+
+    def set_prompt_id(self, job_id: str, prompt_id: str) -> None:
+        self._execute("UPDATE jobs SET prompt_id = ? WHERE job_id = ?", (prompt_id, job_id))
+        self._commit()
+
+    def request_cancel(self, job_id: str) -> bool:
+        row = self._fetchone("SELECT state FROM jobs WHERE job_id = ?", (job_id,))
+        if not row:
+            return False
+        current_state = str(row[0]).strip().lower()
+        if current_state in {"completed", "failed", "error", "canceled", "cancelled"}:
+            return True
+        self._execute("UPDATE jobs SET cancel_requested = 1 WHERE job_id = ?", (job_id,))
+        self._commit()
+        return True
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        row = self._fetchone("SELECT cancel_requested FROM jobs WHERE job_id = ?", (job_id,))
+        if not row:
+            return False
+        try:
+            return int(row[0]) != 0
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _sanitize_artifact_name(output_name: str) -> str:
@@ -160,7 +208,10 @@ class JobStore:
 
     def get(self, job_id: str) -> JobRecord | None:
         row = self._fetchone(
-            "SELECT job_id, state, input_payload, output_payload, error FROM jobs WHERE job_id = ?",
+            """
+            SELECT job_id, state, input_payload, output_payload, error, prompt_id, cancel_requested
+            FROM jobs WHERE job_id = ?
+            """,
             (job_id,),
         )
         if not row:
@@ -173,6 +224,8 @@ class JobStore:
             input_payload=json.loads(row[2]),
             output_payload=output_payload,
             error=row[4],
+            prompt_id=str(row[5]).strip() if row[5] else None,
+            cancel_requested=bool(int(row[6])) if row[6] is not None else False,
         )
 
     def _sanitize_original_name(self, original_name: str | None) -> str | None:

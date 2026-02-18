@@ -483,7 +483,7 @@ def _poll_job_until_terminal(
     endpoint_url: str,
     app_id: str,
     job_id: str,
-    timeout_seconds: int,
+    timeout_seconds: int | None,
     poll_seconds: float,
 ) -> dict[str, Any]:
     terminal_states = {
@@ -496,12 +496,12 @@ def _poll_job_until_terminal(
         "timed_out",
         "timeout",
     }
-    deadline = time.time() + timeout_seconds
+    deadline = (time.time() + timeout_seconds) if timeout_seconds is not None else None
     last_response: dict[str, Any] | None = None
     last_error: str | None = None
     while True:
         now = time.time()
-        if now > deadline:
+        if deadline is not None and now > deadline:
             state_hint = ""
             if last_response is not None:
                 state_hint = f", last_state={last_response.get('state', '')}"
@@ -701,6 +701,18 @@ def _cmd_jobs_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_jobs_cancel(args: argparse.Namespace) -> int:
+    app_id, endpoint_url = _resolve_one_target(args.state_dir, args.app_id)
+    response = _request_json_post(
+        endpoint_url=endpoint_url,
+        app_id=app_id,
+        path=f"/jobs/{args.job_id}/cancel",
+        payload={},
+    )
+    print(json.dumps(response, indent=2))
+    return 0
+
+
 def _cmd_endpoints_list(args: argparse.Namespace) -> int:
     records = _store(args.state_dir).list_records()
     payload_items: list[dict[str, Any]] = []
@@ -781,13 +793,26 @@ def _cmd_invoke(args: argparse.Namespace) -> int:
     job_id = str(run_response.get("job_id", "")).strip()
     if not job_id:
         raise RuntimeError(f"Expected job_id in /run response: {run_response}")
-    terminal = _poll_job_until_terminal(
-        endpoint_url=endpoint_url,
-        app_id=app_id,
-        job_id=job_id,
-        timeout_seconds=args.timeout_seconds,
-        poll_seconds=args.poll_seconds,
-    )
+    try:
+        terminal = _poll_job_until_terminal(
+            endpoint_url=endpoint_url,
+            app_id=app_id,
+            job_id=job_id,
+            timeout_seconds=args.timeout_seconds,
+            poll_seconds=args.poll_seconds,
+        )
+    except RuntimeError as exc:
+        if args.timeout_seconds is None or "Timed out waiting for job_id=" not in str(exc):
+            raise
+        cancel_response = _request_json_post(
+            endpoint_url=endpoint_url,
+            app_id=app_id,
+            path=f"/jobs/{job_id}/cancel",
+            payload={},
+        )
+        raise RuntimeError(
+            f"{exc}. Cancellation requested for job_id={job_id}: {cancel_response}"
+        ) from exc
     print(
         json.dumps(
             {
@@ -861,7 +886,7 @@ def _complete_candidates(state_dir: str | None, words: list[str], index: int) ->
 
     if root == "jobs":
         if index == 2:
-            return ["get"]
+            return ["get", "cancel"]
         if index == 3:
             return sorted(app_ids)
 
@@ -975,7 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
     invoke_cmd.add_argument("app_id")
     invoke_cmd.add_argument("--input-json", default=None)
     invoke_cmd.add_argument("--wait", action="store_true", default=False)
-    invoke_cmd.add_argument("--timeout-seconds", type=int, default=180)
+    invoke_cmd.add_argument("--timeout-seconds", type=int, default=None)
     invoke_cmd.add_argument("--poll-seconds", type=float, default=2.0)
     invoke_cmd.set_defaults(func=_cmd_invoke)
 
@@ -1020,6 +1045,11 @@ def build_parser() -> argparse.ArgumentParser:
     jobs_get_cmd.add_argument("app_id")
     jobs_get_cmd.add_argument("job_id")
     jobs_get_cmd.set_defaults(func=_cmd_jobs_get)
+
+    jobs_cancel_cmd = jobs_subparsers.add_parser("cancel", help="Cancel one running/queued job_id")
+    jobs_cancel_cmd.add_argument("app_id")
+    jobs_cancel_cmd.add_argument("job_id")
+    jobs_cancel_cmd.set_defaults(func=_cmd_jobs_cancel)
 
     completion_cmd = subparsers.add_parser("completion", help="Generate shell completion script")
     completion_cmd.add_argument("shell", choices=["bash", "zsh"])
