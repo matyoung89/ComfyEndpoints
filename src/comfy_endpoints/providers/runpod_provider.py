@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import string
 import subprocess
 import urllib.error
 import urllib.parse
@@ -39,6 +40,13 @@ class RunpodProvider(CloudProviderAdapter):
         self.config = config or RunpodConfig()
         self._create_profile_index = 0
         self._rest_gpu_type_enum_cache: set[str] | None = None
+
+    @staticmethod
+    def _normalize_gpu_label(value: str) -> str:
+        lowered = value.strip().lower()
+        table = str.maketrans({ch: " " for ch in string.punctuation})
+        cleaned = lowered.translate(table)
+        return " ".join(cleaned.split())
 
     @staticmethod
     def _parse_bool(raw: str) -> bool:
@@ -273,7 +281,11 @@ class RunpodProvider(CloudProviderAdapter):
         if not gpu_types:
             raise RunpodError("Unable to resolve RunPod GPU catalog for preferred_gpu_types")
 
-        preferred_normalized = [item.strip().lower() for item in preferred_gpu_types if item.strip()]
+        preferred_normalized = [
+            self._normalize_gpu_label(item)
+            for item in preferred_gpu_types
+            if str(item).strip()
+        ]
         if not preferred_normalized:
             raise RunpodError("preferred_gpu_types is empty after normalization")
 
@@ -281,26 +293,36 @@ class RunpodProvider(CloudProviderAdapter):
         chosen_ids: list[str] = []
         missing: list[str] = []
         discovered: list[str] = []
+        gpu_catalog: list[tuple[str, str, str]] = []
+
+        for gpu in gpu_types:
+            gpu_id = str(gpu.get("id") or "").strip()
+            if not gpu_id:
+                continue
+            display_name = str(gpu.get("displayName") or gpu_id).strip()
+            discovered.append(display_name)
+            gpu_catalog.append(
+                (
+                    gpu_id,
+                    self._normalize_gpu_label(gpu_id),
+                    self._normalize_gpu_label(display_name),
+                )
+            )
 
         for preferred in preferred_normalized:
-            found_id: str | None = None
-            for gpu in gpu_types:
-                gpu_id = str(gpu.get("id") or "").strip()
-                if not gpu_id:
+            matches_for_preferred: list[str] = []
+            for gpu_id, id_normalized, display_normalized in gpu_catalog:
+                exact_match = preferred == id_normalized or preferred == display_normalized
+                family_match = preferred in id_normalized or preferred in display_normalized
+                if not (exact_match or family_match):
                     continue
-                display_name = str(gpu.get("displayName") or gpu_id).strip()
-                discovered.append(display_name)
-                id_normalized = gpu_id.lower()
-                display_normalized = display_name.lower()
-                if preferred == id_normalized or preferred == display_normalized:
-                    if allowed_gpu_type_ids and gpu_id not in allowed_gpu_type_ids:
-                        continue
-                    found_id = gpu_id
-                    break
-            if found_id is None:
+                if allowed_gpu_type_ids and gpu_id not in allowed_gpu_type_ids:
+                    continue
+                matches_for_preferred.append(gpu_id)
+            if not matches_for_preferred:
                 missing.append(preferred)
             else:
-                chosen_ids.append(found_id)
+                chosen_ids.extend(matches_for_preferred)
 
         if missing:
             sample = ", ".join(sorted(set(discovered))[:30]) if discovered else "none"

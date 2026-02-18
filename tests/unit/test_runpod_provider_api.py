@@ -166,6 +166,50 @@ class RunpodProviderApiTest(unittest.TestCase):
                 gpu_type_ids = provider._gpu_type_ids_for_preferred(["NVIDIA RTX PRO 6000", "NVIDIA H100 PCIe"])
         self.assertEqual(gpu_type_ids, ["NVIDIA RTX PRO 6000", "NVIDIA H100 PCIe"])
 
+    def test_gpu_type_ids_for_preferred_resolves_family_label(self) -> None:
+        provider = RunpodProvider()
+        with mock.patch.object(
+            provider,
+            "_graphql_request",
+            return_value={
+                "gpuTypes": [
+                    {
+                        "id": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                        "displayName": "RTX PRO 6000 MaxQ",
+                        "memoryInGb": 96,
+                    },
+                    {
+                        "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                        "displayName": "RTX PRO 6000",
+                        "memoryInGb": 96,
+                    },
+                    {
+                        "id": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                        "displayName": "RTX PRO 6000 WK",
+                        "memoryInGb": 96,
+                    },
+                ]
+            },
+        ):
+            with mock.patch.object(
+                provider,
+                "_rest_gpu_type_enum",
+                return_value={
+                    "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                    "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                },
+            ):
+                gpu_type_ids = provider._gpu_type_ids_for_preferred(["NVIDIA RTX PRO 6000"])
+        self.assertEqual(
+            gpu_type_ids,
+            [
+                "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            ],
+        )
+
     def test_gpu_type_ids_with_min_vram_fails_when_no_rest_enum_overlap(self) -> None:
         provider = RunpodProvider()
         with mock.patch.object(
