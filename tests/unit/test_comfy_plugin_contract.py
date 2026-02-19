@@ -185,6 +185,19 @@ class ComfyPluginContractTest(unittest.TestCase):
             saved_image = Image.open(saved_path)
             self.assertEqual(saved_image.size, (8, 8))
 
+    def test_path_to_video_tensor_resize_dimension_resolution(self) -> None:
+        module = self._load_module()
+        node = module.NODE_CLASS_MAPPINGS["PathToVideoTensor"]()
+
+        width_value, height_value = node._resolve_resize_dims(832, 480, 416, 240)
+        self.assertEqual((width_value, height_value), (416, 240))
+
+        width_value, height_value = node._resolve_resize_dims(832, 480, 416, 0)
+        self.assertEqual((width_value, height_value), (416, 240))
+
+        width_value, height_value = node._resolve_resize_dims(832, 480, 0, 240)
+        self.assertEqual((width_value, height_value), (416, 240))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -317,6 +317,8 @@ class PathToVideoTensorNode:
             },
             "optional": {
                 "max_frames": ("INT", {"default": 0, "min": 0, "max": 1048576}),
+                "resize_width": ("INT", {"default": 0, "min": 0, "max": 8192}),
+                "resize_height": ("INT", {"default": 0, "min": 0, "max": 8192}),
             },
         }
 
@@ -325,7 +327,30 @@ class PathToVideoTensorNode:
     FUNCTION = "execute"
     CATEGORY = "ComfyEndpoints/Path"
 
-    def execute(self, path: str, max_frames: int = 0) -> tuple[Any, int, float]:
+    @staticmethod
+    def _resolve_resize_dims(
+        input_width: int,
+        input_height: int,
+        resize_width: int,
+        resize_height: int,
+    ) -> tuple[int, int]:
+        if resize_width <= 0 and resize_height <= 0:
+            return (input_width, input_height)
+        if resize_width > 0 and resize_height > 0:
+            return (resize_width, resize_height)
+        if resize_width > 0:
+            computed_height = max(1, int(round((input_height / float(input_width)) * float(resize_width))))
+            return (resize_width, computed_height)
+        computed_width = max(1, int(round((input_width / float(input_height)) * float(resize_height))))
+        return (computed_width, resize_height)
+
+    def execute(
+        self,
+        path: str,
+        max_frames: int = 0,
+        resize_width: int = 0,
+        resize_height: int = 0,
+    ) -> tuple[Any, int, float]:
         import cv2
         import numpy as np
         import torch
@@ -349,6 +374,19 @@ class PathToVideoTensorNode:
                 if not ok:
                     break
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_height, frame_width = int(rgb_frame.shape[0]), int(rgb_frame.shape[1])
+                target_width, target_height = self._resolve_resize_dims(
+                    frame_width,
+                    frame_height,
+                    int(resize_width),
+                    int(resize_height),
+                )
+                if target_width != frame_width or target_height != frame_height:
+                    rgb_frame = cv2.resize(
+                        rgb_frame,
+                        (target_width, target_height),
+                        interpolation=cv2.INTER_AREA,
+                    )
                 normalized = rgb_frame.astype(np.float32) / 255.0
                 frames.append(normalized)
         finally:
@@ -371,6 +409,8 @@ class PathToTensorNode:
             },
             "optional": {
                 "max_frames": ("INT", {"default": 0, "min": 0, "max": 1048576}),
+                "resize_width": ("INT", {"default": 0, "min": 0, "max": 8192}),
+                "resize_height": ("INT", {"default": 0, "min": 0, "max": 8192}),
             },
         }
 
@@ -379,11 +419,22 @@ class PathToTensorNode:
     FUNCTION = "execute"
     CATEGORY = "ComfyEndpoints/Path"
 
-    def execute(self, path: str, max_frames: int = 0) -> tuple[Any, str, int, float]:
+    def execute(
+        self,
+        path: str,
+        max_frames: int = 0,
+        resize_width: int = 0,
+        resize_height: int = 0,
+    ) -> tuple[Any, str, int, float]:
         normalized_suffix = Path(path.strip()).suffix.lower()
         video_suffixes = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
         if normalized_suffix in video_suffixes:
-            frames, frame_count, fps_value = PathToVideoTensorNode().execute(path=path, max_frames=max_frames)
+            frames, frame_count, fps_value = PathToVideoTensorNode().execute(
+                path=path,
+                max_frames=max_frames,
+                resize_width=resize_width,
+                resize_height=resize_height,
+            )
             return (frames, "video", frame_count, fps_value)
         image_tensor = PathToImageTensorNode().execute(path=path)[0]
         return (image_tensor, "image", 1, 0.0)

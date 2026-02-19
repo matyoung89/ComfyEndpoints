@@ -34,7 +34,9 @@
           "2",
           0
         ],
-        "max_frames": 0
+        "max_frames": 97,
+        "resize_width": 416,
+        "resize_height": 240
       }
     },
     "5": {
@@ -50,7 +52,7 @@
         "model": "WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
         "base_precision": "fp16_fast",
         "quantization": "disabled",
-        "load_device": "cuda",
+        "load_device": "offload_device",
         "attention_mode": "sdpa"
       }
     },
@@ -65,10 +67,10 @@
         "height": 480,
         "num_frames": 81,
         "force_offload": false,
-        "frame_window_size": 33,
+        "frame_window_size": 81,
         "colormatch": "disabled",
         "pose_strength": 1.0,
-        "face_strength": 1.0,
+        "face_strength": 0.0,
         "ref_images": [
           "3",
           0
@@ -78,7 +80,7 @@
           0
         ],
         "face_images": [
-          "4",
+          "3",
           0
         ]
       }
